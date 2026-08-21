@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fogueira — chame seus amigos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<div class="embers" aria-hidden="true"></div>
+
+<!-- ===================== TELA INICIAL ===================== -->
+<main id="lobby" class="screen lobby">
+  <div class="lobby-card">
+    <div class="brand">
+      <span class="brand-flame">🔥</span>
+      <h1>Fogueira</h1>
+    </div>
+    <p class="tagline">Sua roda de conversa, só com quem você chamar.</p>
+
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="create" role="tab" aria-selected="true">Criar sala</button>
+      <button class="tab" data-tab="join" role="tab" aria-selected="false">Entrar em sala</button>
+    </div>
+
+    <form id="form-create" class="tab-panel active" autocomplete="off">
+      <label>
+        Seu nome
+        <input type="text" id="create-name" maxlength="24" placeholder="Como te chamam?" required />
+      </label>
+      <label>
+        Nome da sala <span class="optional">(opcional)</span>
+        <input type="text" id="create-room-name" maxlength="40" placeholder="Ex: Sextou" />
+      </label>
+      <label>
+        Senha da sala <span class="optional">(recomendado)</span>
+        <input type="password" id="create-password" maxlength="100" placeholder="Só quem tiver a senha entra" />
+      </label>
+      <button type="submit" class="btn-primary">Acender a fogueira</button>
+    </form>
+
+    <form id="form-join" class="tab-panel" autocomplete="off">
+      <label>
+        Seu nome
+        <input type="text" id="join-name" maxlength="24" placeholder="Como te chamam?" required />
+      </label>
+      <label>
+        Código da sala
+        <input type="text" id="join-code" maxlength="6" placeholder="EX: 7F3KQ2" style="text-transform:uppercase" required />
+      </label>
+      <label>
+        Senha <span class="optional">(se a sala tiver)</span>
+        <input type="password" id="join-password" maxlength="100" placeholder="Senha da sala" />
+      </label>
+      <button type="submit" class="btn-primary">Entrar</button>
+    </form>
+
+    <p id="lobby-error" class="error" role="alert"></p>
+
+    <p class="hint">Sua chamada é direta entre os participantes (peer-to-peer) — o servidor nunca vê ou grava áudio, vídeo ou tela.</p>
+  </div>
+</main>
+
+<!-- ===================== TELA DE CHAMADA ===================== -->
+<div id="call" class="screen call" hidden>
+  <header class="call-header">
+    <div class="room-info">
+      <span class="room-name" id="room-name">Fogueira</span>
+      <span class="room-code" id="room-code-display"></span>
+    </div>
+    <button id="copy-invite" class="btn-ghost" type="button">Copiar convite</button>
+  </header>
+
+  <div class="call-body">
+    <aside class="participants" id="participants-list" aria-label="Participantes"></aside>
+
+    <div class="stage-wrap">
+      <div id="stage" class="stage"></div>
+    </div>
+
+    <aside class="chat-panel" id="chat-panel">
+      <div class="chat-log" id="chat-log"></div>
+      <form id="chat-form" autocomplete="off">
+        <input type="text" id="chat-input" maxlength="500" placeholder="Mandar mensagem..." />
+        <button type="submit" aria-label="Enviar">➤</button>
+      </form>
+    </aside>
+  </div>
+
+  <footer class="controls">
+    <button id="toggle-mic" class="control-btn" type="button" aria-pressed="true" title="Mudo/Ativar microfone">
+      <span class="icon">🎙️</span>
+    </button>
+    <button id="toggle-cam" class="control-btn" type="button" aria-pressed="true" title="Ligar/desligar câmera">
+      <span class="icon">📷</span>
+    </button>
+    <button id="toggle-screen" class="control-btn" type="button" title="Compartilhar tela">
+      <span class="icon">🖥️</span>
+    </button>
+    <button id="toggle-chat" class="control-btn" type="button" title="Mostrar/ocultar chat">
+      <span class="icon">💬</span>
+    </button>
+    <button id="leave-call" class="control-btn danger" type="button" title="Sair da chamada">
+      <span class="icon">📵</span>
+    </button>
+  </footer>
+</div>
+
+<template id="tile-template">
+  <div class="tile">
+    <div class="ember-ring">
+      <video autoplay playsinline></video>
+      <div class="avatar-fallback"></div>
+    </div>
+    <span class="tile-name"></span>
+    <span class="tile-badge screen-badge" hidden>Tela</span>
+    <span class="tile-badge muted-badge" hidden>🔇</span>
+  </div>
+</template>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/client.js"></script>
+</body>
+</html>
