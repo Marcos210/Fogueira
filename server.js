@@ -16,7 +16,8 @@ const { customAlphabet } = require('nanoid');
 
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
-const app = express();
+const app = express(); 
+app.set('trust proxy', 1); 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: false }, // só aceita conexões same-origin
