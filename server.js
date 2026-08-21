@@ -60,8 +60,8 @@ function pruneRooms() {
 }
 setInterval(pruneRooms, 30_000);
 
-const createRoomLimiter = rateLimit({ windowMs: 5 * 60_000, max: 30 }); 
-const joinRoomLimiter = rateLimit({ windowMs: 60_000, max: 60 });
+const createRoomLimiter = rateLimit({ windowMs: 5 * 60_000, max: 30, validate: { trustProxy: false, xForwardedForHeader: false }, }); 
+const joinRoomLimiter = rateLimit({ windowMs: 60_000, max: 60, validate: { trustProxy: false, xForwardedForHeader: false }, });
 
 app.post('/api/rooms', createRoomLimiter, async (req, res) => {
   const { password, name } = req.body || {};
