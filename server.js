@@ -17,13 +17,10 @@ const { customAlphabet } = require('nanoid');
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
 const app = express();
-// O Render (e a maioria dos provedores de deploy) coloca o app atrás de um
-// proxy reverso. Sem isso, o rate limiter não consegue identificar cada
-// visitante corretamente e acaba bloqueando todo mundo junto.
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: false }, // só aceita conexões same-origin
+  cors: { origin: false },
 });
 
 app.disable('x-powered-by');
@@ -51,7 +48,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- Sala em memória (nada é gravado em disco / banco de dados) ---
 const rooms = new Map();
 const MAX_MEMBERS_PER_ROOM = 20;
-const ROOM_TTL_MS = 1000 * 60 * 60 * 6; // limpeza de segurança após 6h
+const ROOM_TTL_MS = 1000 * 60 * 60 * 6;
 
 function pruneRooms() {
   const now = Date.now();
@@ -119,7 +116,7 @@ app.get('/api/turn-credentials', joinRoomLimiter, async (req, res) => {
   const domain = process.env.METERED_DOMAIN;
   const apiKey = process.env.METERED_API_KEY;
   if (!domain || !apiKey) {
-    return res.status(200).json([]); // sem credenciais configuradas: o cliente usa a reserva comunitária
+    return res.status(200).json([]);
   }
   try {
     const meteredRes = await fetch(`https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`);
@@ -128,7 +125,7 @@ app.get('/api/turn-credentials', joinRoomLimiter, async (req, res) => {
     res.json(servers);
   } catch (err) {
     console.error('Falha ao buscar credenciais TURN do Metered:', err.message);
-    res.status(200).json([]); // o cliente cai pra reserva comunitária
+    res.status(200).json([]);
   }
 });
 
@@ -160,11 +157,10 @@ io.on('connection', (socket) => {
     socket.to(code).emit('peer-joined', { id: socket.id, name: safeName });
   });
 
-  // Repassa mensagens de sinalização WebRTC (SDP/ICE) — conteúdo opaco pro servidor.
   socket.on('signal', ({ to, data } = {}) => {
     if (!joinedRoom || !to || !data) return;
     const room = rooms.get(joinedRoom);
-    if (!room || !room.members.has(to)) return; // só repassa dentro da mesma sala
+    if (!room || !room.members.has(to)) return;
     io.to(to).emit('signal', { from: socket.id, data });
   });
 

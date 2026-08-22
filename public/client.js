@@ -1,9 +1,6 @@
 (() => {
   'use strict';
 
-  // O TURN de verdade (que retransmite a chamada quando a conexão direta
-  // falha) é buscado no próprio servidor, que guarda a chave da conta do
-  // Metered em segredo (variável de ambiente) — nunca no navegador.
   const FALLBACK_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:openrelay.metered.ca:80' },
@@ -39,7 +36,8 @@
   let localStream = null;
   let screenStream = null;
   let isSharingScreen = false;
-  const peers = new Map(); // id -> { pc, name, tileEl, videoEl, ring, analyser, raf, sharingScreen }
+  let remoteAudioMuted = false;
+  const peers = new Map();
 
   // ---------- elementos ----------
   const lobby = document.getElementById('lobby');
@@ -63,7 +61,6 @@
     });
   });
 
-  // Se veio um link de convite com ?sala=CODIGO, pré-preenche o formulário de entrar.
   const params = new URLSearchParams(location.search);
   if (params.get('sala')) {
     document.querySelector('.tab[data-tab="join"]').click();
@@ -119,7 +116,7 @@
     roomCode = code;
     displayName = name;
 
-    const iceServersReady = loadIceServers(); // dispara em paralelo, não trava a tela
+    const iceServersReady = loadIceServers();
 
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -132,7 +129,7 @@
       }
     }
 
-    await iceServersReady; // garante que os servidores TURN já estão prontos antes de conectar
+    await iceServersReady;
 
     lobby.hidden = true;
     callScreen.hidden = false;
@@ -172,18 +169,16 @@
     if (!peer) peer = createPeerConnection(from, 'Amigo', false);
 
     if (data.type === 'offer') {
-      console.log('[PulseCord] Recebi uma oferta (offer) de', from);
       await peer.pc.setRemoteDescription(data);
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       socket.emit('signal', { to: from, data: peer.pc.localDescription });
     } else if (data.type === 'answer') {
-      console.log('[PulseCord] Recebi uma resposta (answer) de', from);
       await peer.pc.setRemoteDescription(data);
     } else if (data.candidate) {
       try {
         await peer.pc.addIceCandidate(data);
-      } catch (_) { /* candidatos atrasados podem falhar sem problema */ }
+      } catch (_) {}
     }
   });
 
@@ -230,16 +225,18 @@
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         socket.emit('signal', { to: id, data: e.candidate });
-        const type = e.candidate.type || (e.candidate.candidate || '').match(/typ (\w+)/)?.[1];
-        console.log('[PulseCord] Candidato ICE (', name, '):', type);
       }
     };
 
     pc.ontrack = (e) => {
-      console.log('[PulseCord] Recebi uma trilha de', name, '— tipo:', e.track.kind, '— stream:', e.streams[0]?.id);
       peer.videoEl.srcObject = e.streams[0];
       peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       startAudioMeter(peer, e.streams[0]);
+
+      // Aplica o estado de mute remoto ao receber nova stream
+      if (remoteAudioMuted) {
+        e.streams[0].getAudioTracks().forEach((t) => { t.enabled = false; });
+      }
     };
 
     pc.oniceconnectionstatechange = () => {
@@ -247,16 +244,8 @@
     };
 
     pc.onconnectionstatechange = () => {
-      console.log('[PulseCord] Conexão geral com', name, ':', pc.connectionState);
-    };
-
-    pc.onicegatheringstatechange = () => {
-      console.log('[PulseCord] Coleta de candidatos com', name, ':', pc.iceGatheringState);
-    };
-
-    pc.onconnectionstatechange = () => {
       if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        // deixa o evento peer-left do servidor cuidar da limpeza visual
+        // peer-left do servidor cuida da limpeza visual
       }
     };
 
@@ -307,13 +296,13 @@
 
   function initials(name) {
     const words = name
-      .replace(/\(.*?\)/g, '') // remove coisas como "(você)" do cálculo
+      .replace(/\(.*?\)/g, '')
       .trim()
       .split(/\s+/)
       .filter(Boolean);
     return words
       .slice(0, 2)
-      .map((w) => Array.from(w)[0]?.toUpperCase() || '') // Array.from evita quebrar emojis
+      .map((w) => Array.from(w)[0]?.toUpperCase() || '')
       .join('');
   }
 
@@ -330,7 +319,7 @@
     });
   }
 
-  // ---------- brilho reativo ao áudio (o "signature" da fogueira) ----------
+  // ---------- brilho reativo ao áudio ----------
   function startAudioMeter(peer, stream) {
     if (!stream.getAudioTracks().length) return;
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -354,7 +343,6 @@
   }
 
   // ---------- sons de notificação ----------
-  // Gerados na hora com Web Audio (sem depender de nenhum arquivo de áudio externo).
   let notifCtx = null;
   function playNotificationSound(kind) {
     try {
@@ -375,7 +363,7 @@
         osc.start(start);
         osc.stop(start + dur + 0.03);
       });
-    } catch (_) { /* som é um extra; se falhar, não deve quebrar a chamada */ }
+    } catch (_) {}
   }
 
   // ---------- lista de participantes ----------
@@ -402,6 +390,7 @@
   const screenBtn = document.getElementById('toggle-screen');
   const chatBtn = document.getElementById('toggle-chat');
   const leaveBtn = document.getElementById('leave-call');
+  const remoteAudioBtn = document.getElementById('toggle-remote-audio');
 
   micBtn.addEventListener('click', () => {
     const track = localStream?.getAudioTracks()[0];
@@ -420,30 +409,41 @@
   screenBtn.addEventListener('click', async () => {
     if (!isSharingScreen) {
       try {
-        // Miramos 1080p/60fps: é o teto que pedimos ao navegador, mas o que
-        // realmente chega do outro lado depende da rede e do hardware de
-        // cada participante — não é algo que dá pra garantir 100%.
         screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             frameRate: { ideal: 60, max: 60 },
             width: { ideal: 1920, max: 1920 },
             height: { ideal: 1080, max: 1080 },
           },
-          audio: false,
+          audio: true,
         });
       } catch (_) {
-        return; // usuário cancelou o prompt do navegador
+        return;
       }
       const screenTrack = screenStream.getVideoTracks()[0];
-      screenTrack.contentHint = 'motion'; // pede ao codec pra priorizar fluidez (fps) sobre nitidez
+      screenTrack.contentHint = 'motion';
 
       await sendVideoTrackToPeers(screenTrack, screenStream);
+
+      // Envia o áudio da tela se existir
+      const screenAudioTrack = screenStream.getAudioTracks()[0];
+      if (screenAudioTrack) {
+        peers.forEach((peer, id) => {
+          if (id === 'self') return;
+          const existingAudioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio' && s.track !== localStream?.getAudioTracks()[0]);
+          if (existingAudioSender) {
+            existingAudioSender.replaceTrack(screenAudioTrack);
+          } else {
+            peer.pc.addTrack(screenAudioTrack, screenStream);
+            renegotiate(id, peer.pc);
+          }
+        });
+      }
+
       screenTrack.onended = () => stopScreenShare();
 
       const selfPeer = peers.get('self');
       selfPeer.videoEl.srcObject = screenStream;
-      // Sem isso, o círculo com as iniciais do nome ficava cobrindo o vídeo
-      // sempre que a pessoa não tinha ligado a câmera antes.
       selfPeer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       selfPeer.tileEl.classList.add('screen-tile');
       selfPeer.tileEl.querySelector('.screen-badge').hidden = false;
@@ -458,11 +458,21 @@
 
   function stopScreenShare() {
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
+
+    // Volta o áudio do microfone para todos os peers
+    const micAudioTrack = localStream?.getAudioTracks()[0];
+    peers.forEach((peer, id) => {
+      if (id === 'self') return;
+      const audioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+      if (audioSender && micAudioTrack) {
+        audioSender.replaceTrack(micAudioTrack);
+      }
+    });
+
     const camTrack = localStream.getVideoTracks()[0];
     if (camTrack) {
       sendVideoTrackToPeers(camTrack, localStream);
     } else {
-      // Não havia câmera antes: removemos o vídeo enviado em vez de travar num quadro parado.
       peers.forEach((peer, id) => {
         if (id === 'self') return;
         const sender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
@@ -483,11 +493,6 @@
     refreshStageLayout();
   }
 
-  // Envia uma trilha de vídeo (câmera ou tela) pra todo mundo na sala.
-  // Se já existe um "sender" de vídeo, só troca a trilha (rápido, sem
-  // renegociar). Se essa pessoa nunca tinha enviado vídeo antes (ex: só
-  // liberou o microfone), precisamos adicionar a trilha e renegociar a
-  // conexão pra abrir esse novo canal de vídeo.
   async function sendVideoTrackToPeers(newTrack, stream) {
     const jobs = [];
     peers.forEach((peer, id) => {
@@ -511,15 +516,11 @@
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('signal', { to: id, data: pc.localDescription });
-      console.log('[PulseCord] Renegociação enviada para', id);
     } catch (err) {
       console.error('[PulseCord] Falha ao renegociar com', id, ':', err);
     }
   }
 
-  // Pede uma taxa de bits mais alta pro navegador tentar manter nitidez em
-  // 1080p/60fps na tela compartilhada. É um pedido, não uma garantia —
-  // a rede de cada participante ainda pode reduzir isso na prática.
   function boostVideoQuality(sender) {
     try {
       const params = sender.getParameters();
@@ -527,8 +528,24 @@
       params.encodings[0].maxBitrate = 8_000_000;
       params.encodings[0].maxFramerate = 60;
       sender.setParameters(params).catch(() => {});
-    } catch (_) { /* nem todo navegador aceita ajustar isso; segue sem quebrar */ }
+    } catch (_) {}
   }
+
+  // ---------- botão de áudio remoto (mute/unmute da live) ----------
+  remoteAudioBtn.addEventListener('click', () => {
+    remoteAudioMuted = !remoteAudioMuted;
+    remoteAudioBtn.setAttribute('aria-pressed', String(!remoteAudioMuted));
+    remoteAudioBtn.querySelector('.icon').textContent = remoteAudioMuted ? '🔇' : '🔊';
+
+    // Aplica a todos os peers
+    peers.forEach((peer, id) => {
+      if (id === 'self') return;
+      const stream = peer.videoEl.srcObject;
+      if (stream) {
+        stream.getAudioTracks().forEach((t) => { t.enabled = !remoteAudioMuted; });
+      }
+    });
+  });
 
   chatBtn.addEventListener('click', () => chatPanel.classList.toggle('hidden'));
 
@@ -598,7 +615,6 @@
     lobby.hidden = false;
     if (errorMsg) lobbyError.textContent = errorMsg;
 
-    // reconecta o socket para uma possível próxima sala nesta mesma aba
     socket.connect();
   }
 

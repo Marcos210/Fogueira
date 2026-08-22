@@ -18,10 +18,7 @@
 
 * { box-sizing: border-box; }
 
-/* Garante que o atributo `hidden` sempre vença, mesmo sobre classes com
-   display:flex — sem isso, a tela some do código mas continua visível. */
 [hidden] { display: none !important; }
-
 
 html, body {
   height: 100%;
@@ -46,7 +43,6 @@ button, input {
   * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
 
-/* ---------- brasas de fundo ---------- */
 .embers {
   position: fixed;
   inset: 0;
@@ -266,7 +262,6 @@ input[type="text"]:focus, input[type="password"]:focus { border-color: var(--emb
   aspect-ratio: unset;
 }
 
-/* Faixa de miniaturas dos outros participantes enquanto alguém compartilha a tela */
 .thumb-strip {
   display: flex;
   gap: 12px;
@@ -305,7 +300,11 @@ input[type="text"]:focus, input[type="password"]:focus { border-color: var(--emb
   display: block;
   background: var(--bg);
 }
-.ember-ring video.hidden-video { display: none; }
+
+/* FIX: tela inteira no screen share — contain em vez de cover */
+.screen-tile .ember-ring video {
+  object-fit: contain;
+}
 
 .avatar-fallback {
   position: absolute;
