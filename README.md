@@ -1,4 +1,4 @@
-# 🔥 Fogueira
+# 🔥 PulseCord
 
 Um app simples pra você e seus amigos: chat, chamada de voz/vídeo e
 compartilhamento de tela, em salas com código e senha.
@@ -12,8 +12,7 @@ npm start
 
 Abra `http://localhost:3000` no navegador. Para outra pessoa entrar de outro
 computador/rede, você precisa publicar o servidor num endereço acessível por
-HTTPS (veja "Colocando no ar" abaixo) — em `localhost` só funciona na sua
-própria máquina.
+HTTPS — em `localhost` só funciona na sua própria máquina.
 
 ## Como funciona (resumo)
 
@@ -29,34 +28,21 @@ própria máquina.
 - **Senha de sala**: guardada só como hash (bcrypt), nunca em texto puro.
 - **Malha (mesh)**: cada participante se conecta diretamente com todos os
   outros. Funciona muito bem para grupos pequenos (o alvo aqui é até ~20
-  pessoas). Passando bastante disso, o ideal seria um SFU (servidor de
-  mídia) — um projeto bem maior.
+  pessoas).
 
 ## O que já tem de segurança
 
 - Senha de sala com hash (bcrypt), nunca armazenada em texto puro
 - Rate limiting em criação/entrada de salas (evita força bruta e spam)
 - Cabeçalhos de segurança (Helmet: CSP, sem `X-Powered-By`, etc.)
-- Sinalização restrita à mesma sala (não dá pra "espiar" outra sala)
+- Sinalização restrita à mesma sala
 - Sem persistência: nada de histórico de chat ou gravação fica salvo
 - Limite de participantes por sala e expiração automática
 
-## O que falta se você quiser algo "de verdade" em produção
+## Escopo atual
 
-Sendo honesto, para ficar robusto o suficiente para uso mais sério, ainda
-faltaria:
-
-- **HTTPS obrigatório** (getUserMedia/getDisplayMedia exigem HTTPS fora de
-  `localhost`) — normalmente resolvido com um proxy tipo Caddy/Nginx +
-  Let's Encrypt, ou hospedando em algo como Render/Fly.io/Railway.
-- **Servidor TURN** (ex.: coturn) para garantir conexão mesmo em redes com
-  NAT/firewall restritivo — sem TURN, uma fração das conexões pode falhar.
-- Login/identidade real, se quiser mais controle de quem entra além da
-  senha da sala.
-- Testes automatizados e monitoramento, se for algo usado com frequência.
-
-## Colocando no ar
-
-A forma mais simples: um serviço com HTTPS automático (Render, Railway,
-Fly.io) apontando pro `npm start`. Depois é só compartilhar o link com o
-código da sala (ou o botão "Copiar convite" já gera esse link).
+Este é um app de salas temporárias — sem contas, sem lista de amigos, sem
+histórico persistente. Se um dia quiser evoluir pra algo com contas de
+usuário, amizades, servidores/canais permanentes e mensagens salvas, isso é
+uma reformulação bem maior (banco de dados relacional, autenticação, etc.),
+não um ajuste no que já existe.
