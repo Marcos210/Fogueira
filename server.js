@@ -36,7 +36,7 @@ app.use(
         styleSrc: ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'", 'ws:', 'wss:', 'https://pulsecord.metered.live', 'stun:', 'turn:', 'turns:'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'stun:', 'turn:', 'turns:'],
         mediaSrc: ["'self'", 'blob:'],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
@@ -113,6 +113,23 @@ app.post('/api/rooms/:code/check', joinRoomLimiter, async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'Senha incorreta.' });
   }
   res.json({ ok: true, name: room.name, hasPassword: !!room.passwordHash });
+});
+
+app.get('/api/turn-credentials', joinRoomLimiter, async (req, res) => {
+  const domain = process.env.METERED_DOMAIN;
+  const apiKey = process.env.METERED_API_KEY;
+  if (!domain || !apiKey) {
+    return res.status(200).json([]); // sem credenciais configuradas: o cliente usa a reserva comunitária
+  }
+  try {
+    const meteredRes = await fetch(`https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`);
+    if (!meteredRes.ok) throw new Error(`Metered respondeu ${meteredRes.status}`);
+    const servers = await meteredRes.json();
+    res.json(servers);
+  } catch (err) {
+    console.error('Falha ao buscar credenciais TURN do Metered:', err.message);
+    res.status(200).json([]); // o cliente cai pra reserva comunitária
+  }
 });
 
 io.on('connection', (socket) => {
