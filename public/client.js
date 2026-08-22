@@ -153,11 +153,13 @@
     if (!peer) peer = createPeerConnection(from, 'Amigo', false);
 
     if (data.type === 'offer') {
+      console.log('[PulseCord] Recebi uma oferta (offer) de', from);
       await peer.pc.setRemoteDescription(data);
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       socket.emit('signal', { to: from, data: peer.pc.localDescription });
     } else if (data.type === 'answer') {
+      console.log('[PulseCord] Recebi uma resposta (answer) de', from);
       await peer.pc.setRemoteDescription(data);
     } else if (data.candidate) {
       try {
@@ -211,9 +213,14 @@
     };
 
     pc.ontrack = (e) => {
+      console.log('[PulseCord] Recebi uma trilha de', name, '— tipo:', e.track.kind, '— stream:', e.streams[0]?.id);
       peer.videoEl.srcObject = e.streams[0];
       peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       startAudioMeter(peer, e.streams[0]);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('[PulseCord] Estado da conexão com', name, ':', pc.iceConnectionState);
     };
 
     pc.onconnectionstatechange = () => {
@@ -473,7 +480,10 @@
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('signal', { to: id, data: pc.localDescription });
-    } catch (_) { /* se falhar, a chamada de áudio continua funcionando normalmente */ }
+      console.log('[PulseCord] Renegociação enviada para', id);
+    } catch (err) {
+      console.error('[PulseCord] Falha ao renegociar com', id, ':', err);
+    }
   }
 
   // Pede uma taxa de bits mais alta pro navegador tentar manter nitidez em
