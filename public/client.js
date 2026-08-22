@@ -1,13 +1,9 @@
 (() => {
   'use strict';
 
-  // Servidor STUN público (só ajuda a descobrir o caminho de rede).
   // O TURN de verdade (que retransmite a chamada quando a conexão direta
-  // falha) é buscado na sua conta do Metered logo abaixo — com um
-  // servidor comunitário gratuito como reserva, caso a busca falhe.
-  const METERED_DOMAIN = 'pulsecord.metered.live';
-  const METERED_API_KEY = 'NU7B2v7VmZngmzngpozD519Nk-eP7kSbC1uWkcieU7T6IccK';
-
+  // falha) é buscado no próprio servidor, que guarda a chave da conta do
+  // Metered em segredo (variável de ambiente) — nunca no navegador.
   const FALLBACK_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:openrelay.metered.ca:80' },
@@ -20,15 +16,17 @@
 
   async function loadIceServers() {
     try {
-      const res = await fetch(`https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`);
+      const res = await fetch('/api/turn-credentials');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const servers = await res.json();
       if (Array.isArray(servers) && servers.length) {
         iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, ...servers];
         console.log('[PulseCord] Usando servidores TURN do Metered:', servers.map((s) => s.urls));
+      } else {
+        console.log('[PulseCord] Servidor não tem TURN configurado, usando reserva comunitária.');
       }
     } catch (err) {
-      console.warn('[PulseCord] Não consegui buscar TURN do Metered, usando reserva comunitária:', err);
+      console.warn('[PulseCord] Não consegui buscar TURN do servidor, usando reserva comunitária:', err);
     }
   }
 
