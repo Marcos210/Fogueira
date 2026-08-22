@@ -17,7 +17,11 @@
 }
 
 * { box-sizing: border-box; }
+
+/* Garante que o atributo `hidden` sempre vença, mesmo sobre classes com
+   display:flex — sem isso, a tela some do código mas continua visível. */
 [hidden] { display: none !important; }
+
 
 html, body {
   height: 100%;
@@ -231,21 +235,47 @@ input[type="text"]:focus, input[type="password"]:focus { border-color: var(--emb
 }
 .participant-row.speaking .dot { opacity: 1; }
 
-.stage-wrap { min-width: 0; padding: 22px; overflow-y: auto; }
+.stage-wrap {
+  min-width: 0;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
 .stage {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 18px;
   align-content: start;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.stage.has-screen {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+}
+.stage.has-screen .tile.screen-tile {
   height: 100%;
+  min-height: 0;
 }
-.stage.has-screen { grid-template-columns: 1fr; }
-.stage.has-screen .tile.screen-tile { grid-column: 1 / -1; }
-.stage.has-screen .tile:not(.screen-tile) {
-  position: fixed;
-  width: 140px;
-  z-index: 5;
+.stage.has-screen .tile.screen-tile .ember-ring {
+  height: 100%;
+  aspect-ratio: unset;
 }
+
+/* Faixa de miniaturas dos outros participantes enquanto alguém compartilha a tela */
+.thumb-strip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  padding: 2px;
+}
+.thumb-strip .tile { width: 140px; flex-shrink: 0; }
+.thumb-strip .ember-ring { aspect-ratio: 4 / 3; }
 
 .tile {
   display: flex;
