@@ -115,7 +115,7 @@
   // ---------- sinalização ----------
   socket.on('joined', ({ selfId: id, roomName, peers: existingPeers }) => {
     selfId = id;
-    document.getElementById('room-name').textContent = roomName || 'Fogueira';
+    document.getElementById('room-name').textContent = roomName || 'PulseCord';
     addLocalTile();
     existingPeers.forEach((p) => createPeerConnection(p.id, p.name, true));
     updateParticipantsList();
@@ -124,7 +124,7 @@
   socket.on('peer-joined', ({ id, name }) => {
     createPeerConnection(id, name, false);
     updateParticipantsList();
-    logSystem(`${name} entrou na fogueira.`);
+    logSystem(`${name} entrou na sala.`);
   });
 
   socket.on('peer-left', ({ id }) => {
