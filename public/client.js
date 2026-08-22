@@ -18,12 +18,9 @@
       const servers = await res.json();
       if (Array.isArray(servers) && servers.length) {
         iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, ...servers];
-        console.log('[PulseCord] Usando servidores TURN do Metered:', servers.map((s) => s.urls));
-      } else {
-        console.log('[PulseCord] Servidor não tem TURN configurado, usando reserva comunitária.');
       }
     } catch (err) {
-      console.warn('[PulseCord] Não consegui buscar TURN do servidor, usando reserva comunitária:', err);
+      console.warn('[PulseCord] Usando reserva comunitaria:', err);
     }
   }
 
@@ -37,7 +34,16 @@
   let screenStream = null;
   let isSharingScreen = false;
   let remoteAudioMuted = false;
+  let liveVolume = 1.0; // 0 a 1.5 (150%)
   const peers = new Map();
+
+  // ---------- audio context global ----------
+  let remoteAudioCtx = null;
+  function getRemoteAudioCtx() {
+    if (!remoteAudioCtx) remoteAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (remoteAudioCtx.state === 'suspended') remoteAudioCtx.resume();
+    return remoteAudioCtx;
+  }
 
   // ---------- elementos ----------
   const lobby = document.getElementById('lobby');
@@ -49,6 +55,64 @@
   const participantsList = document.getElementById('participants-list');
   const chatLog = document.getElementById('chat-log');
   const chatPanel = document.getElementById('chat-panel');
+
+  // ---------- volume overlay ----------
+  const volumeOverlay = document.getElementById('volume-overlay');
+  const volumeSlider = document.getElementById('volume-slider');
+  const volumeValue = document.getElementById('volume-value');
+  let volumeTargetPeer = null;
+
+  function showVolumeOverlay(e, peerId) {
+    volumeTargetPeer = peerId;
+    volumeSlider.value = liveVolume;
+    updateVolumeLabel();
+    volumeOverlay.hidden = false;
+    const rect = stage.getBoundingClientRect();
+    let x = e.clientX - rect.left;
+    let y = e.clientY - rect.top;
+    x = Math.max(80, Math.min(x, rect.width - 80));
+    y = Math.max(40, Math.min(y, rect.height - 40));
+    volumeOverlay.style.left = x + 'px';
+    volumeOverlay.style.top = y + 'px';
+  }
+
+  function hideVolumeOverlay() {
+    volumeOverlay.hidden = true;
+    volumeTargetPeer = null;
+  }
+
+  function updateVolumeLabel() {
+    const pct = Math.round(liveVolume * 100);
+    volumeValue.textContent = pct + '%';
+  }
+
+  volumeSlider.addEventListener('input', () => {
+    liveVolume = parseFloat(volumeSlider.value);
+    updateVolumeLabel();
+    applyVolumeToAll();
+  });
+
+  volumeOverlay.addEventListener('mousedown', (e) => e.stopPropagation());
+  volumeOverlay.addEventListener('mouseup', (e) => e.stopPropagation());
+
+  function applyVolumeToAll() {
+    peers.forEach((peer, id) => {
+      if (id === 'self') return;
+      if (peer.gainNode) {
+        peer.gainNode.gain.value = remoteAudioMuted ? 0 : liveVolume;
+      }
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!volumeOverlay.hidden && !volumeOverlay.contains(e.target)) {
+      hideVolumeOverlay();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideVolumeOverlay();
+  });
 
   // ---------- tabs do lobby ----------
   document.querySelectorAll('.tab').forEach((tab) => {
@@ -82,7 +146,7 @@
         body: JSON.stringify({ name: roomName, password: password || undefined }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Não foi possível criar a sala.');
+      if (!res.ok) throw new Error(data.error || 'Nao foi possivel criar a sala.');
       await enterCall(data.code, name);
     } catch (err) {
       lobbyError.textContent = err.message;
@@ -104,7 +168,7 @@
         body: JSON.stringify({ password }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Não foi possível entrar na sala.');
+      if (!res.ok) throw new Error(data.error || 'Nao foi possivel entrar na sala.');
       await enterCall(code, name);
     } catch (err) {
       lobbyError.textContent = err.message;
@@ -124,7 +188,7 @@
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
       } catch (err2) {
-        lobbyError.textContent = 'Precisamos de acesso ao microfone (e câmera, se quiser vídeo).';
+        lobbyError.textContent = 'Precisamos de acesso ao microfone.';
         return;
       }
     }
@@ -138,7 +202,7 @@
     socket.emit('join-room', { code, displayName: name });
   }
 
-  // ---------- sinalização ----------
+  // ---------- sinalizacao ----------
   socket.on('joined', ({ selfId: id, roomName, peers: existingPeers }) => {
     selfId = id;
     document.getElementById('room-name').textContent = roomName || 'PulseCord';
@@ -205,6 +269,11 @@
     const tileEl = createTile(name);
     stage.appendChild(tileEl);
 
+    const audioCtx = getRemoteAudioCtx();
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = remoteAudioMuted ? 0 : liveVolume;
+    gainNode.connect(audioCtx.destination);
+
     const peer = {
       pc,
       name,
@@ -214,6 +283,9 @@
       analyser: null,
       raf: null,
       sharingScreen: false,
+      audioCtx,
+      gainNode,
+      sourceNode: null,
     };
     peers.set(id, peer);
     refreshStageLayout();
@@ -229,14 +301,29 @@
     };
 
     pc.ontrack = (e) => {
-      peer.videoEl.srcObject = e.streams[0];
-      peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
-      startAudioMeter(peer, e.streams[0]);
+      console.log('[PulseCord] ontrack de', name, '— kind:', e.track.kind);
+      const stream = e.streams[0];
+      if (!stream) return;
 
-      // Aplica o estado de mute remoto ao receber nova stream
-      if (remoteAudioMuted) {
-        e.streams[0].getAudioTracks().forEach((t) => { t.enabled = false; });
+      // Configura o elemento de video
+      peer.videoEl.srcObject = stream;
+      peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
+
+      // Conecta o audio via GainNode para controle de volume
+      if (e.track.kind === 'audio') {
+        // Desconecta source anterior se existir
+        if (peer.sourceNode) {
+          try { peer.sourceNode.disconnect(); } catch (_) {}
+        }
+        const source = audioCtx.createMediaStreamSource(stream);
+        source.connect(peer.gainNode);
+        peer.sourceNode = source;
+
+        // Garante que o elemento de video nao mute o audio remoto
+        peer.videoEl.muted = false;
       }
+
+      startAudioMeter(peer, stream);
     };
 
     pc.oniceconnectionstatechange = () => {
@@ -245,7 +332,7 @@
 
     pc.onconnectionstatechange = () => {
       if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        // peer-left do servidor cuida da limpeza visual
+        // peer-left cuida
       }
     };
 
@@ -264,13 +351,14 @@
     const peer = peers.get(id);
     if (!peer) return;
     if (peer.raf) cancelAnimationFrame(peer.raf);
+    if (peer.sourceNode) { try { peer.sourceNode.disconnect(); } catch (_) {} }
     peer.pc.close();
     peer.tileEl.remove();
     peers.delete(id);
     refreshStageLayout();
   }
 
-  // ---------- tiles / vídeo ----------
+  // ---------- tiles / video ----------
   function createTile(name) {
     const node = tileTemplate.content.firstElementChild.cloneNode(true);
     node.querySelector('.tile-name').textContent = name;
@@ -279,7 +367,7 @@
   }
 
   function addLocalTile() {
-    const tileEl = createTile(`${displayName} (você)`);
+    const tileEl = createTile(`${displayName} (voce)`);
     tileEl.dataset.self = 'true';
     stage.appendChild(tileEl);
     const videoEl = tileEl.querySelector('video');
@@ -295,15 +383,8 @@
   }
 
   function initials(name) {
-    const words = name
-      .replace(/\(.*?\)/g, '')
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
-    return words
-      .slice(0, 2)
-      .map((w) => Array.from(w)[0]?.toUpperCase() || '')
-      .join('');
+    const words = name.replace(/\(.*?\)/g, '').trim().split(/\s+/).filter(Boolean);
+    return words.slice(0, 2).map((w) => Array.from(w)[0]?.toUpperCase() || '').join('');
   }
 
   function refreshStageLayout() {
@@ -319,10 +400,10 @@
     });
   }
 
-  // ---------- brilho reativo ao áudio ----------
+  // ---------- audio meter ----------
   function startAudioMeter(peer, stream) {
     if (!stream.getAudioTracks().length) return;
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getRemoteAudioCtx();
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
@@ -342,7 +423,7 @@
     tick();
   }
 
-  // ---------- sons de notificação ----------
+  // ---------- sons de notificacao ----------
   let notifCtx = null;
   function playNotificationSound(kind) {
     try {
@@ -366,10 +447,10 @@
     } catch (_) {}
   }
 
-  // ---------- lista de participantes ----------
+  // ---------- participantes ----------
   function updateParticipantsList() {
     participantsList.innerHTML = '';
-    const rows = [{ id: 'self', name: `${displayName} (você)` }, ...[...peers.entries()]
+    const rows = [{ id: 'self', name: `${displayName} (voce)` }, ...[...peers.entries()]
       .filter(([id]) => id !== 'self')
       .map(([id, p]) => ({ id, name: p.name }))];
 
@@ -406,6 +487,7 @@
     camBtn.setAttribute('aria-pressed', String(track.enabled));
   });
 
+  // ---------- compartilhamento de tela ----------
   screenBtn.addEventListener('click', async () => {
     if (!isSharingScreen) {
       try {
@@ -420,14 +502,19 @@
       } catch (_) {
         return;
       }
+
+      console.log('[PulseCord] Screen share audio tracks:', screenStream.getAudioTracks().length);
+
       const screenTrack = screenStream.getVideoTracks()[0];
       screenTrack.contentHint = 'motion';
 
+      // Envia video da tela
       await sendVideoTrackToPeers(screenTrack, screenStream);
 
-      // Troca o áudio do microfone pelo áudio da tela (substitui o track existente)
+      // Envia audio da tela substituindo o microfone
       const screenAudioTrack = screenStream.getAudioTracks()[0];
       if (screenAudioTrack) {
+        console.log('[PulseCord] Enviando audio da tela');
         peers.forEach((peer, id) => {
           if (id === 'self') return;
           const audioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
@@ -435,6 +522,8 @@
             audioSender.replaceTrack(screenAudioTrack);
           }
         });
+      } else {
+        console.log('[PulseCord] Nenhum track de audio na tela (-browser nao suporta ou usuario nao marcou "compartilhar audio")');
       }
 
       screenTrack.onended = () => stopScreenShare();
@@ -456,7 +545,7 @@
   function stopScreenShare() {
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
 
-    // Volta o áudio do microfone para todos os peers
+    // Volta audio do microfone
     const micAudioTrack = localStream?.getAudioTracks()[0];
     peers.forEach((peer, id) => {
       if (id === 'self') return;
@@ -466,7 +555,7 @@
       }
     });
 
-    const camTrack = localStream.getVideoTracks()[0];
+    const camTrack = localStream?.getVideoTracks()[0];
     if (camTrack) {
       sendVideoTrackToPeers(camTrack, localStream);
     } else {
@@ -528,20 +617,53 @@
     } catch (_) {}
   }
 
-  // ---------- botão de áudio remoto (mute/unmute da live) ----------
+  // ---------- mute/unmute live ----------
   remoteAudioBtn.addEventListener('click', () => {
     remoteAudioMuted = !remoteAudioMuted;
     remoteAudioBtn.setAttribute('aria-pressed', String(!remoteAudioMuted));
-    remoteAudioBtn.querySelector('.icon').textContent = remoteAudioMuted ? '🔇' : '🔊';
+    remoteAudioBtn.querySelector('.icon').textContent = remoteAudioMuted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
+    applyVolumeToAll();
+  });
 
-    // Aplica a todos os peers
+  // ---------- botao direito = volume da live ----------
+  stage.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const tile = e.target.closest('.tile');
+    if (!tile) return;
+
+    // Encontra o peer desse tile
+    let peerId = null;
     peers.forEach((peer, id) => {
-      if (id === 'self') return;
-      const stream = peer.videoEl.srcObject;
-      if (stream) {
-        stream.getAudioTracks().forEach((t) => { t.enabled = !remoteAudioMuted; });
-      }
+      if (peer.tileEl === tile) peerId = id;
     });
+    if (!peerId || peerId === 'self') return;
+
+    showVolumeOverlay(e, peerId);
+  });
+
+  // Scroll no volume overlay = ajusta volume
+  volumeOverlay.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.05 : 0.05;
+    liveVolume = Math.max(0, Math.min(1.5, liveVolume + delta));
+    volumeSlider.value = liveVolume;
+    updateVolumeLabel();
+    applyVolumeToAll();
+  });
+
+  // ---------- click esquerdo = tela cheia ----------
+  stage.addEventListener('click', (e) => {
+    if (volumeOverlay.hidden === false) return;
+    const tile = e.target.closest('.tile');
+    if (!tile) return;
+    const video = tile.querySelector('video');
+    if (!video || !video.srcObject) return;
+
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      tile.requestFullscreen().catch(() => {});
+    }
   });
 
   chatBtn.addEventListener('click', () => chatPanel.classList.toggle('hidden'));
@@ -574,7 +696,7 @@
   function logChat(name, text, isSelf) {
     const el = document.createElement('div');
     el.className = 'chat-msg';
-    el.innerHTML = `<span class="who">${escapeHtml(isSelf ? 'Você' : name)}</span>${escapeHtml(text)}`;
+    el.innerHTML = `<span class="who">${escapeHtml(isSelf ? 'Voce' : name)}</span>${escapeHtml(text)}`;
     chatLog.appendChild(el);
     chatLog.scrollTop = chatLog.scrollHeight;
   }
@@ -593,10 +715,11 @@
     return div.innerHTML;
   }
 
-  // ---------- saída ----------
+  // ---------- saida ----------
   function teardownAllAndReturnToLobby(errorMsg) {
     peers.forEach((peer, id) => {
       if (peer.raf) cancelAnimationFrame(peer.raf);
+      if (peer.sourceNode) { try { peer.sourceNode.disconnect(); } catch (_) {} }
       if (peer.pc) peer.pc.close();
     });
     peers.clear();

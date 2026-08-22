@@ -126,6 +126,13 @@
   </div>
 </template>
 
+<!-- Volume overlay (botao direito) -->
+<div id="volume-overlay" class="volume-overlay" hidden>
+  <span class="volume-icon">🔊</span>
+  <input type="range" id="volume-slider" min="0" max="1.5" step="0.01" value="1" />
+  <span id="volume-value" class="volume-value">100%</span>
+</div>
+
 <script src="/socket.io/socket.io.js"></script>
 <script src="/client.js"></script>
 </body>
