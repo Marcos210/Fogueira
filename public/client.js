@@ -236,19 +236,30 @@
 
   socket.on('signal', async ({ from, data }) => {
     let peer = peers.get(from);
-    if (!peer) peer = createPeerConnection(from, 'Amigo', false);
 
+    // Se recebemos uma offer nova, sempre destrói a conexão antiga e recria
     if (data.type === 'offer') {
-      await peer.pc.setRemoteDescription(data);
-      const answer = await peer.pc.createAnswer();
-      await peer.pc.setLocalDescription(answer);
-      socket.emit('signal', { to: from, data: peer.pc.localDescription });
-    } else if (data.type === 'answer') {
-      await peer.pc.setRemoteDescription(data);
-    } else if (data.candidate) {
-      try {
+      if (peer) teardownPeer(from);
+      peer = createPeerConnection(from, 'Amigo', false);
+    } else if (!peer) {
+      return; // Ignora answer/candidate de peer desconhecido
+    }
+
+    try {
+      if (data.type === 'offer') {
+        await peer.pc.setRemoteDescription(data);
+        const answer = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(answer);
+        socket.emit('signal', { to: from, data: peer.pc.localDescription });
+      } else if (data.type === 'answer') {
+        if (peer.pc.signalingState === 'have-local-offer') {
+          await peer.pc.setRemoteDescription(data);
+        }
+      } else if (data.candidate) {
         await peer.pc.addIceCandidate(data);
-      } catch (_) {}
+      }
+    } catch (err) {
+      console.warn('[PulseCord] Erro ao processar signal:', err.message);
     }
   });
 
@@ -270,8 +281,13 @@
   });
 
   // ---------- WebRTC ----------
-  function createPeerConnection(id, name, isInitiator) {
-    const pc = new RTCPeerConnection({ iceServers });
+  function createPeerConnection(id, name, isInitiator, forceRelay) {
+    const pcConfig = { iceServers };
+    if (forceRelay) {
+      pcConfig.iceTransportPolicy = 'relay';
+      console.log('[PulseCord] Conectando em modo RELAY com', name);
+    }
+    const pc = new RTCPeerConnection(pcConfig);
     const tileEl = createTile(name);
     stage.appendChild(tileEl);
 
@@ -334,12 +350,12 @@
 
     let iceRestartCount = 0;
     let disconnectTimer = null;
+    let relayAttempted = forceRelay || false;
 
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
       console.log('[PulseCord] ICE com', name, ':', state);
 
-      // Se desconectou, tenta reconectar (ICE restart)
       if (state === 'disconnected') {
         disconnectTimer = setTimeout(async () => {
           if (pc.iceConnectionState === 'disconnected' && iceRestartCount < 3) {
@@ -354,6 +370,20 @@
             }
           }
         }, 3000);
+      } else if (state === 'failed') {
+        if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+        if (!relayAttempted) {
+          // P2P falhou — reconecta forçando relay (TURN)
+          console.log('[PulseCord] P2P falhou com', name, '— reconectando via RELAY...');
+          teardownPeer(id);
+          setTimeout(() => {
+            createPeerConnection(id, name, true, true);
+            updateParticipantsList();
+          }, 500);
+        } else {
+          console.log('[PulseCord] Relay tambem falhou com', name, '— conexao impossivel');
+        }
+        return;
       } else {
         if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
         if (state === 'connected' || state === 'completed') {
