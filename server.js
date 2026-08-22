@@ -1,4 +1,4 @@
-// Fogueira — servidor de sinalização
+// PulseCord — servidor de sinalização
 //
 // Este servidor NUNCA vê ou transporta áudio/vídeo/tela dos usuários.
 // Ele só ajuda dois navegadores a se encontrarem (sinalização WebRTC);
@@ -16,8 +16,11 @@ const { customAlphabet } = require('nanoid');
 
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
-const app = express(); 
-app.set('trust proxy', 1); 
+const app = express();
+// O Render (e a maioria dos provedores de deploy) coloca o app atrás de um
+// proxy reverso. Sem isso, o rate limiter não consegue identificar cada
+// visitante corretamente e acaba bloqueando todo mundo junto.
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: false }, // só aceita conexões same-origin
@@ -60,8 +63,16 @@ function pruneRooms() {
 }
 setInterval(pruneRooms, 30_000);
 
-const createRoomLimiter = rateLimit({ windowMs: 5 * 60_000, max: 30, validate: { trustProxy: false, xForwardedForHeader: false }, }); 
-const joinRoomLimiter = rateLimit({ windowMs: 60_000, max: 60, validate: { trustProxy: false, xForwardedForHeader: false }, });
+const createRoomLimiter = rateLimit({
+  windowMs: 5 * 60_000,
+  max: 30,
+  validate: { trustProxy: false, xForwardedForHeader: false },
+});
+const joinRoomLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  validate: { trustProxy: false, xForwardedForHeader: false },
+});
 
 app.post('/api/rooms', createRoomLimiter, async (req, res) => {
   const { password, name } = req.body || {};
@@ -81,7 +92,7 @@ app.post('/api/rooms', createRoomLimiter, async (req, res) => {
 
   rooms.set(code, {
     code,
-    name: (name && name.trim()) || 'Fogueira sem nome',
+    name: (name && name.trim()) || 'Sala sem nome',
     passwordHash,
     createdAt: Date.now(),
     lastActive: Date.now(),
@@ -171,5 +182,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🔥 Fogueira rodando em http://localhost:${PORT}`);
+  console.log(`🔥 PulseCord rodando em http://localhost:${PORT}`);
 });
