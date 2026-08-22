@@ -36,7 +36,7 @@ app.use(
         styleSrc: ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'", 'ws:', 'wss:'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'https://pulsecord.metered.live', 'stun:', 'turn:', 'turns:'],
         mediaSrc: ["'self'", 'blob:'],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
