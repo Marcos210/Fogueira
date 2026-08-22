@@ -183,6 +183,12 @@ io.on('connection', (socket) => {
     socket.to(joinedRoom).emit('screen-share-state', { id: socket.id, sharing: !!sharing });
   });
 
+  // Relay de midia: recebe binario e repassa pra sala (fallback quando WebRTC falha)
+  socket.on('relay-media', ({ type, data } = {}) => {
+    if (!joinedRoom || !type || !data) return;
+    socket.to(joinedRoom).emit('relay-media', { from: socket.id, type, data });
+  });
+
   socket.on('disconnect', () => {
     if (!joinedRoom) return;
     const room = rooms.get(joinedRoom);
