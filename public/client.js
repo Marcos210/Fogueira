@@ -209,7 +209,11 @@
     }
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) socket.emit('signal', { to: id, data: e.candidate });
+      if (e.candidate) {
+        socket.emit('signal', { to: id, data: e.candidate });
+        const type = e.candidate.type || (e.candidate.candidate || '').match(/typ (\w+)/)?.[1];
+        console.log('[PulseCord] Candidato ICE (', name, '):', type);
+      }
     };
 
     pc.ontrack = (e) => {
@@ -220,7 +224,15 @@
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log('[PulseCord] Estado da conexão com', name, ':', pc.iceConnectionState);
+      console.log('[PulseCord] ICE com', name, ':', pc.iceConnectionState);
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log('[PulseCord] Conexão geral com', name, ':', pc.connectionState);
+    };
+
+    pc.onicegatheringstatechange = () => {
+      console.log('[PulseCord] Coleta de candidatos com', name, ':', pc.iceGatheringState);
     };
 
     pc.onconnectionstatechange = () => {
