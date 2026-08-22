@@ -425,17 +425,14 @@
 
       await sendVideoTrackToPeers(screenTrack, screenStream);
 
-      // Envia o áudio da tela se existir
+      // Troca o áudio do microfone pelo áudio da tela (substitui o track existente)
       const screenAudioTrack = screenStream.getAudioTracks()[0];
       if (screenAudioTrack) {
         peers.forEach((peer, id) => {
           if (id === 'self') return;
-          const existingAudioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio' && s.track !== localStream?.getAudioTracks()[0]);
-          if (existingAudioSender) {
-            existingAudioSender.replaceTrack(screenAudioTrack);
-          } else {
-            peer.pc.addTrack(screenAudioTrack, screenStream);
-            renegotiate(id, peer.pc);
+          const audioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+          if (audioSender) {
+            audioSender.replaceTrack(screenAudioTrack);
           }
         });
       }
