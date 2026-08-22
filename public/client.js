@@ -1,19 +1,36 @@
 (() => {
   'use strict';
 
-  // Servidores STUN ajudam a descobrir o caminho de rede entre os pares.
-  // Quando isso não é suficiente (redes de empresa, 4G/5G, NAT mais
-  // restritivo), é preciso um servidor TURN pra retransmitir a chamada.
-  // Este aqui é um serviço comunitário gratuito, bom pra testar — se o uso
-  // crescer bastante, vale trocar por um TURN próprio (ex: coturn) ou uma
-  // conta paga num provedor como o Metered.
-  const ICE_SERVERS = [
+  // Servidor STUN público (só ajuda a descobrir o caminho de rede).
+  // O TURN de verdade (que retransmite a chamada quando a conexão direta
+  // falha) é buscado na sua conta do Metered logo abaixo — com um
+  // servidor comunitário gratuito como reserva, caso a busca falhe.
+  const METERED_DOMAIN = 'pulsecord.metered.live';
+  const METERED_API_KEY = 'NU7B2v7VmZngmzngpozD519Nk-eP7kSbC1uWkcieU7T6IccK';
+
+  const FALLBACK_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:openrelay.metered.ca:80' },
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ];
+
+  let iceServers = FALLBACK_ICE_SERVERS;
+
+  async function loadIceServers() {
+    try {
+      const res = await fetch(`https://${METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const servers = await res.json();
+      if (Array.isArray(servers) && servers.length) {
+        iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, ...servers];
+        console.log('[PulseCord] Usando servidores TURN do Metered:', servers.map((s) => s.urls));
+      }
+    } catch (err) {
+      console.warn('[PulseCord] Não consegui buscar TURN do Metered, usando reserva comunitária:', err);
+    }
+  }
 
   const socket = io();
 
@@ -104,6 +121,8 @@
     roomCode = code;
     displayName = name;
 
+    const iceServersReady = loadIceServers(); // dispara em paralelo, não trava a tela
+
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     } catch (err) {
@@ -114,6 +133,8 @@
         return;
       }
     }
+
+    await iceServersReady; // garante que os servidores TURN já estão prontos antes de conectar
 
     lobby.hidden = true;
     callScreen.hidden = false;
@@ -187,7 +208,7 @@
 
   // ---------- WebRTC ----------
   function createPeerConnection(id, name, isInitiator) {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers });
     const tileEl = createTile(name);
     stage.appendChild(tileEl);
 
