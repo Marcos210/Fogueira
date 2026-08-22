@@ -23,6 +23,7 @@
   const lobbyError = document.getElementById('lobby-error');
   const tileTemplate = document.getElementById('tile-template');
   const stage = document.getElementById('stage');
+  const thumbStrip = document.getElementById('thumb-strip');
   const participantsList = document.getElementById('participants-list');
   const chatLog = document.getElementById('chat-log');
   const chatPanel = document.getElementById('chat-panel');
@@ -125,6 +126,7 @@
     createPeerConnection(id, name, false);
     updateParticipantsList();
     logSystem(`${name} entrou na sala.`);
+    playNotificationSound('join');
   });
 
   socket.on('peer-left', ({ id }) => {
@@ -134,6 +136,7 @@
       teardownPeer(id);
     }
     updateParticipantsList();
+    playNotificationSound('leave');
   });
 
   socket.on('signal', async ({ from, data }) => {
@@ -188,6 +191,7 @@
       sharingScreen: false,
     };
     peers.set(id, peer);
+    refreshStageLayout();
 
     if (localStream) {
       localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
@@ -255,12 +259,28 @@
   }
 
   function initials(name) {
-    return name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() || '').join('');
+    const words = name
+      .replace(/\(.*?\)/g, '') // remove coisas como "(você)" do cálculo
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    return words
+      .slice(0, 2)
+      .map((w) => Array.from(w)[0]?.toUpperCase() || '') // Array.from evita quebrar emojis
+      .join('');
   }
 
   function refreshStageLayout() {
-    const anySharing = [...peers.values()].some((p) => p.tileEl.classList.contains('screen-tile'));
+    const sharingEntry = [...peers.entries()].find(([, p]) => p.tileEl.classList.contains('screen-tile'));
+    const anySharing = !!sharingEntry;
     stage.classList.toggle('has-screen', anySharing);
+    thumbStrip.hidden = !anySharing;
+
+    peers.forEach((peer, id) => {
+      const isSharer = anySharing && sharingEntry[0] === id;
+      const target = anySharing && !isSharer ? thumbStrip : stage;
+      if (peer.tileEl.parentElement !== target) target.appendChild(peer.tileEl);
+    });
   }
 
   // ---------- brilho reativo ao áudio (o "signature" da fogueira) ----------
@@ -284,6 +304,31 @@
       peer.raf = requestAnimationFrame(tick);
     }
     tick();
+  }
+
+  // ---------- sons de notificação ----------
+  // Gerados na hora com Web Audio (sem depender de nenhum arquivo de áudio externo).
+  let notifCtx = null;
+  function playNotificationSound(kind) {
+    try {
+      notifCtx = notifCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const now = notifCtx.currentTime;
+      const notes = kind === 'join' ? [520, 780] : [700, 420];
+      notes.forEach((freq, i) => {
+        const start = now + i * 0.09;
+        const dur = 0.14;
+        const osc = notifCtx.createOscillator();
+        const gain = notifCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.16, start + 0.02);
+        gain.gain.linearRampToValueAtTime(0, start + dur);
+        osc.connect(gain).connect(notifCtx.destination);
+        osc.start(start);
+        osc.stop(start + dur + 0.03);
+      });
+    } catch (_) { /* som é um extra; se falhar, não deve quebrar a chamada */ }
   }
 
   // ---------- lista de participantes ----------
@@ -328,16 +373,31 @@
   screenBtn.addEventListener('click', async () => {
     if (!isSharingScreen) {
       try {
-        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        // Miramos 1080p/60fps: é o teto que pedimos ao navegador, mas o que
+        // realmente chega do outro lado depende da rede e do hardware de
+        // cada participante — não é algo que dá pra garantir 100%.
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: { ideal: 60, max: 60 },
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+          },
+          audio: false,
+        });
       } catch (_) {
         return; // usuário cancelou o prompt do navegador
       }
       const screenTrack = screenStream.getVideoTracks()[0];
-      replaceOutgoingVideoTrack(screenTrack);
+      screenTrack.contentHint = 'motion'; // pede ao codec pra priorizar fluidez (fps) sobre nitidez
+
+      await sendVideoTrackToPeers(screenTrack, screenStream);
       screenTrack.onended = () => stopScreenShare();
 
       const selfPeer = peers.get('self');
       selfPeer.videoEl.srcObject = screenStream;
+      // Sem isso, o círculo com as iniciais do nome ficava cobrindo o vídeo
+      // sempre que a pessoa não tinha ligado a câmera antes.
+      selfPeer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       selfPeer.tileEl.classList.add('screen-tile');
       selfPeer.tileEl.querySelector('.screen-badge').hidden = false;
       isSharingScreen = true;
@@ -352,10 +412,22 @@
   function stopScreenShare() {
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
     const camTrack = localStream.getVideoTracks()[0];
-    if (camTrack) replaceOutgoingVideoTrack(camTrack);
+    if (camTrack) {
+      sendVideoTrackToPeers(camTrack, localStream);
+    } else {
+      // Não havia câmera antes: removemos o vídeo enviado em vez de travar num quadro parado.
+      peers.forEach((peer, id) => {
+        if (id === 'self') return;
+        const sender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+        if (sender) peer.pc.removeTrack(sender);
+      });
+    }
 
     const selfPeer = peers.get('self');
     selfPeer.videoEl.srcObject = localStream;
+    if (!camTrack || !camTrack.enabled) {
+      selfPeer.tileEl.querySelector('.avatar-fallback').style.display = '';
+    }
     selfPeer.tileEl.classList.remove('screen-tile');
     selfPeer.tileEl.querySelector('.screen-badge').hidden = true;
     isSharingScreen = false;
@@ -364,12 +436,48 @@
     refreshStageLayout();
   }
 
-  function replaceOutgoingVideoTrack(newTrack) {
+  // Envia uma trilha de vídeo (câmera ou tela) pra todo mundo na sala.
+  // Se já existe um "sender" de vídeo, só troca a trilha (rápido, sem
+  // renegociar). Se essa pessoa nunca tinha enviado vídeo antes (ex: só
+  // liberou o microfone), precisamos adicionar a trilha e renegociar a
+  // conexão pra abrir esse novo canal de vídeo.
+  async function sendVideoTrackToPeers(newTrack, stream) {
+    const jobs = [];
     peers.forEach((peer, id) => {
       if (id === 'self') return;
       const sender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-      if (sender) sender.replaceTrack(newTrack);
+      if (sender) {
+        sender.replaceTrack(newTrack);
+        boostVideoQuality(sender);
+      } else {
+        peer.pc.addTrack(newTrack, stream);
+        const newSender = peer.pc.getSenders().find((s) => s.track === newTrack);
+        if (newSender) boostVideoQuality(newSender);
+        jobs.push(renegotiate(id, peer.pc));
+      }
     });
+    await Promise.all(jobs);
+  }
+
+  async function renegotiate(id, pc) {
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('signal', { to: id, data: pc.localDescription });
+    } catch (_) { /* se falhar, a chamada de áudio continua funcionando normalmente */ }
+  }
+
+  // Pede uma taxa de bits mais alta pro navegador tentar manter nitidez em
+  // 1080p/60fps na tela compartilhada. É um pedido, não uma garantia —
+  // a rede de cada participante ainda pode reduzir isso na prática.
+  function boostVideoQuality(sender) {
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.encodings[0].maxBitrate = 8_000_000;
+      params.encodings[0].maxFramerate = 60;
+      sender.setParameters(params).catch(() => {});
+    } catch (_) { /* nem todo navegador aceita ajustar isso; segue sem quebrar */ }
   }
 
   chatBtn.addEventListener('click', () => chatPanel.classList.toggle('hidden'));
@@ -429,6 +537,8 @@
     });
     peers.clear();
     stage.innerHTML = '';
+    thumbStrip.innerHTML = '';
+    thumbStrip.hidden = true;
     chatLog.innerHTML = '';
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
