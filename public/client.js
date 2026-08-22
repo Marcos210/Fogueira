@@ -1,10 +1,19 @@
 (() => {
   'use strict';
 
-  // Servidores STUN públicos para descobrir o caminho de rede entre os pares.
-  // Para funcionar atrás de redes/NATs mais restritivas com confiabilidade total,
-  // o ideal em produção é somar um servidor TURN (ex.: coturn ou um provedor pago).
-  const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+  // Servidores STUN ajudam a descobrir o caminho de rede entre os pares.
+  // Quando isso não é suficiente (redes de empresa, 4G/5G, NAT mais
+  // restritivo), é preciso um servidor TURN pra retransmitir a chamada.
+  // Este aqui é um serviço comunitário gratuito, bom pra testar — se o uso
+  // crescer bastante, vale trocar por um TURN próprio (ex: coturn) ou uma
+  // conta paga num provedor como o Metered.
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  ];
 
   const socket = io();
 
