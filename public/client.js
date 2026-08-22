@@ -3,10 +3,16 @@
 
   const FALLBACK_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:openrelay.metered.ca:80' },
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'stun:stun.relay.metered.ca:443' },
   ];
 
   let iceServers = FALLBACK_ICE_SERVERS;
@@ -305,35 +311,59 @@
       const stream = e.streams[0];
       if (!stream) return;
 
-      // Configura o elemento de video
-      peer.videoEl.srcObject = stream;
       peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
 
-      // Conecta o audio via GainNode para controle de volume
+      // Video: sempre no elemento
+      if (e.track.kind === 'video') {
+        peer.videoEl.srcObject = stream;
+      }
+
+      // Audio: SEMPRE mudo o <video> e rodo pelo GainNode (controle de volume 0-150%)
+      peer.videoEl.muted = true;
       if (e.track.kind === 'audio') {
-        // Desconecta source anterior se existir
         if (peer.sourceNode) {
           try { peer.sourceNode.disconnect(); } catch (_) {}
         }
         const source = audioCtx.createMediaStreamSource(stream);
         source.connect(peer.gainNode);
         peer.sourceNode = source;
-
-        // Garante que o elemento de video nao mute o audio remoto
-        peer.videoEl.muted = false;
       }
 
       startAudioMeter(peer, stream);
     };
 
+    let iceRestartCount = 0;
+    let disconnectTimer = null;
+
     pc.oniceconnectionstatechange = () => {
-      console.log('[PulseCord] ICE com', name, ':', pc.iceConnectionState);
+      const state = pc.iceConnectionState;
+      console.log('[PulseCord] ICE com', name, ':', state);
+
+      // Se desconectou, tenta reconectar (ICE restart)
+      if (state === 'disconnected') {
+        disconnectTimer = setTimeout(async () => {
+          if (pc.iceConnectionState === 'disconnected' && iceRestartCount < 3) {
+            iceRestartCount++;
+            console.log('[PulseCord] ICE restart #' + iceRestartCount, 'com', name);
+            try {
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              socket.emit('signal', { to: id, data: pc.localDescription });
+            } catch (err) {
+              console.warn('[PulseCord] Falha no ICE restart:', err);
+            }
+          }
+        }, 3000);
+      } else {
+        if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+        if (state === 'connected' || state === 'completed') {
+          iceRestartCount = 0;
+        }
+      }
     };
 
     pc.onconnectionstatechange = () => {
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        // peer-left cuida
-      }
+      console.log('[PulseCord] Conexao com', name, ':', pc.connectionState);
     };
 
     if (isInitiator) {
@@ -493,9 +523,9 @@
       try {
         screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
-            frameRate: { ideal: 60, max: 60 },
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 30, max: 30 },
+            width: { ideal: 1280, max: 1280 },
+            height: { ideal: 720, max: 720 },
           },
           audio: true,
         });
@@ -611,8 +641,8 @@
     try {
       const params = sender.getParameters();
       if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-      params.encodings[0].maxBitrate = 8_000_000;
-      params.encodings[0].maxFramerate = 60;
+      params.encodings[0].maxBitrate = 2_500_000;
+      params.encodings[0].maxFramerate = 30;
       sender.setParameters(params).catch(() => {});
     } catch (_) {}
   }
