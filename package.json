@@ -1,5 +1,5 @@
 {
-  "name": "fogueira",
+  "name": "pulsecord",
   "version": "1.0.0",
   "description": "Chamadas de voz/video e compartilhamento de tela para grupos pequenos de amigos.",
   "main": "server.js",
