@@ -687,49 +687,75 @@
   });
 
   // ---------- compartilhamento de tela ----------
+  let selectedWidth = 1280;
+  let selectedHeight = 720;
+  let selectedFps = 30;
+  const qualityPopover = document.getElementById('quality-popover');
+
+  document.querySelectorAll('.quality-option').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.querySelectorAll('.quality-option').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedWidth = parseInt(btn.dataset.width);
+      selectedHeight = parseInt(btn.dataset.height);
+      selectedFps = parseInt(btn.dataset.fps);
+      qualityPopover.hidden = true;
+      startScreenShare();
+    });
+  });
+
   screenBtn.addEventListener('click', async () => {
-    if (!isSharingScreen) {
-      try {
-        screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: 30, max: 30 }, width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 } },
-          audio: true,
-        });
-      } catch (_) { return; }
-
-      const screenTrack = screenStream.getVideoTracks()[0];
-      screenTrack.contentHint = 'motion';
-
-      // Tenta enviar via WebRTC pra quem tem conexao
-      await sendVideoTrackToPeers(screenTrack, screenStream);
-
-      // Tambem envia via relay (pra quem nao tem WebRTC)
-      startRelaySender(screenStream);
-      socket.emit('relay-media', { type: 'state', data: true });
-
-      const screenAudioTrack = screenStream.getAudioTracks()[0];
-      if (screenAudioTrack) {
-        peers.forEach((peer, id) => {
-          if (id === 'self') return;
-          const audioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
-          if (audioSender) audioSender.replaceTrack(screenAudioTrack);
-        });
-      }
-
-      screenTrack.onended = () => stopScreenShare();
-
-      const selfPeer = peers.get('self');
-      selfPeer.videoEl.srcObject = screenStream;
-      selfPeer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
-      selfPeer.tileEl.classList.add('screen-tile');
-      selfPeer.tileEl.querySelector('.screen-badge').hidden = false;
-      isSharingScreen = true;
-      screenBtn.classList.add('active-share');
-      socket.emit('screen-share-state', { sharing: true });
-      refreshStageLayout();
-    } else {
+    if (isSharingScreen) {
       stopScreenShare();
+      return;
+    }
+    qualityPopover.hidden = !qualityPopover.hidden;
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!qualityPopover.hidden && !qualityPopover.contains(e.target) && e.target !== screenBtn && !screenBtn.contains(e.target)) {
+      qualityPopover.hidden = true;
     }
   });
+
+  async function startScreenShare() {
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: selectedFps, max: selectedFps }, width: { ideal: selectedWidth, max: selectedWidth }, height: { ideal: selectedHeight, max: selectedHeight } },
+        audio: true,
+      });
+    } catch (_) { return; }
+
+    const screenTrack = screenStream.getVideoTracks()[0];
+    screenTrack.contentHint = 'motion';
+
+    await sendVideoTrackToPeers(screenTrack, screenStream);
+
+    startRelaySender(screenStream);
+    socket.emit('relay-media', { type: 'state', data: true });
+
+    const screenAudioTrack = screenStream.getAudioTracks()[0];
+    if (screenAudioTrack) {
+      peers.forEach((peer, id) => {
+        if (id === 'self') return;
+        const audioSender = peer.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+        if (audioSender) audioSender.replaceTrack(screenAudioTrack);
+      });
+    }
+
+    screenTrack.onended = () => stopScreenShare();
+
+    const selfPeer = peers.get('self');
+    selfPeer.videoEl.srcObject = screenStream;
+    selfPeer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
+    selfPeer.tileEl.classList.add('screen-tile');
+    selfPeer.tileEl.querySelector('.screen-badge').hidden = false;
+    isSharingScreen = true;
+    screenBtn.classList.add('active-share');
+    socket.emit('screen-share-state', { sharing: true });
+    refreshStageLayout();
+  }
 
   function stopScreenShare() {
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());

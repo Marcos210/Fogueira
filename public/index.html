@@ -102,6 +102,17 @@
     <button id="toggle-screen" class="control-btn" type="button" title="Compartilhar tela">
       <span class="icon">🖥️</span>
     </button>
+    <div id="quality-popover" class="quality-popover" hidden>
+      <div class="quality-title">Qualidade da transmissão</div>
+      <button class="quality-option" data-width="1920" data-height="1080" data-fps="60">
+        <span class="quality-label">1080p</span>
+        <span class="quality-detail">60 FPS</span>
+      </button>
+      <button class="quality-option active" data-width="1280" data-height="720" data-fps="30">
+        <span class="quality-label">720p</span>
+        <span class="quality-detail">30 FPS</span>
+      </button>
+    </div>
     <button id="toggle-remote-audio" class="control-btn" type="button" aria-pressed="true" title="Ativar/desativar som da live">
       <span class="icon">🔊</span>
     </button>
