@@ -95,6 +95,7 @@ app.post('/api/rooms', createRoomLimiter, async (req, res) => {
     lastActive: Date.now(),
     members: new Map(),
     relaySubs: new Set(),
+    screenSharers: new Set(),
   });
 
   res.json({ code });
@@ -181,6 +182,10 @@ io.on('connection', (socket) => {
 
   socket.on('screen-share-state', ({ sharing } = {}) => {
     if (!joinedRoom) return;
+    const room = rooms.get(joinedRoom);
+    if (!room) return;
+    if (sharing) room.screenSharers.add(socket.id);
+    else room.screenSharers.delete(socket.id);
     socket.to(joinedRoom).emit('screen-share-state', { id: socket.id, sharing: !!sharing });
   });
 
@@ -190,6 +195,18 @@ io.on('connection', (socket) => {
     const room = rooms.get(joinedRoom);
     if (!room) return;
     room.relaySubs.add(socket.id);
+    // Sincroniza quem ja estava compartilhando antes desse cliente entrar no relay
+    if (room.screenSharers.size) {
+      io.to(socket.id).emit('relay-sharers', { ids: [...room.screenSharers] });
+    }
+  });
+
+  // Avisa o outro lado que esta conexao agora e via relay (derruba a WebRTC "zumbi" dele)
+  socket.on('relay-mode', ({ to } = {}) => {
+    if (!joinedRoom || !to) return;
+    const room = rooms.get(joinedRoom);
+    if (!room || !room.members.has(to)) return;
+    io.to(to).emit('relay-mode', { from: socket.id });
   });
 
   // Relay de midia: recebe e repassa SÓ pra quem pediu relay (fallback do WebRTC)
@@ -197,6 +214,10 @@ io.on('connection', (socket) => {
     if (!joinedRoom || !type || !data) return;
     const room = rooms.get(joinedRoom);
     if (!room) return;
+    if (type === 'state') {
+      if (data) room.screenSharers.add(socket.id);
+      else room.screenSharers.delete(socket.id);
+    }
     const size = typeof data === 'string' ? data.length : (data.byteLength || data.size || 0);
     if (size > 400_000) return; // protecao contra flood
     for (const peerId of room.relaySubs) {
@@ -209,6 +230,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(joinedRoom);
     if (!room) return;
     room.relaySubs.delete(socket.id);
+    room.screenSharers.delete(socket.id);
     room.members.delete(socket.id);
     room.lastActive = Date.now();
     socket.to(joinedRoom).emit('peer-left', { id: socket.id });

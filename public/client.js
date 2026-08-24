@@ -31,6 +31,16 @@
 
   const socket = io();
 
+  // ---------- toast (avisos na tela) ----------
+  const toastEl = document.getElementById('toast');
+  let toastTimer = null;
+  function showToast(msg, ms = 4500) {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastEl.hidden = true; }, ms);
+  }
+
   // ---------- estado ----------
   let selfId = null;
   let displayName = '';
@@ -280,6 +290,35 @@
   });
 
   // ---------- RELAY: receber midia via Socket.io ----------
+  let pendingRelaySharers = [];
+
+  socket.on('relay-sharers', ({ ids }) => {
+    pendingRelaySharers = ids || [];
+    applyPendingRelaySharers();
+  });
+
+  function applyPendingRelaySharers() {
+    pendingRelaySharers.forEach((id) => {
+      const rp = relayPeers.get(id);
+      if (rp && !rp.sharingScreen) {
+        rp.sharingScreen = true;
+        rp.tileEl.classList.add('screen-tile');
+        rp.tileEl.querySelector('.screen-badge').hidden = false;
+      }
+    });
+    refreshStageLayout();
+  }
+
+  // O outro lado avisou que desistiu do WebRTC comigo — entro em relay com ele tambem
+  socket.on('relay-mode', ({ from }) => {
+    if (from === selfId || relayPeers.has(from)) return;
+    const peer = peers.get(from);
+    if (peer) teardownPeer(from);
+    createRelayPeer(from, peerNames.get(from) || 'Amigo');
+    socket.emit('relay-subscribe');
+    updateParticipantsList();
+  });
+
   socket.on('relay-media', ({ from, type, data }) => {
     // Se ja tenho WebRTC conectado com essa pessoa, ignoro o relay (evita tile duplicado)
     const wp = peers.get(from);
@@ -301,7 +340,7 @@
         rp.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       };
       img.src = 'data:image/jpeg;base64,' + data;
-    } else if (type === 'audio' && data) {
+    } else if ((type === 'audio' || type === 'mic') && data) {
       try {
         const buf = data instanceof ArrayBuffer ? data : Uint8Array.from(atob(data), (c) => c.charCodeAt(0)).buffer;
         const int16 = new Int16Array(buf);
@@ -361,6 +400,8 @@
       sharingScreen: false,
     };
     relayPeers.set(id, rp);
+    startMicRelay(); // garante que meu mic chega pra quem so tem relay comigo
+    applyPendingRelaySharers();
     refreshStageLayout();
     return rp;
   }
@@ -371,7 +412,48 @@
     if (rp.gainNode) { try { rp.gainNode.disconnect(); } catch (_) {} }
     rp.tileEl.remove();
     relayPeers.delete(id);
+    if (relayPeers.size === 0) stopMicRelay();
     refreshStageLayout();
+  }
+
+  // ---------- RELAY: microfone (quem so tem relay comigo precisa me ouvir) ----------
+  let micRelayNodes = null;
+
+  function startMicRelay() {
+    if (micRelayNodes) return;
+    const micTrack = localStream?.getAudioTracks()[0];
+    if (!micTrack) return;
+    const audioCtx = getRemoteAudioCtx();
+    const source = audioCtx.createMediaStreamSource(localStream);
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0; // sem eco: o mic NAO volta pros meus alto-falantes
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+    const ratio = Math.max(1, Math.round(audioCtx.sampleRate / 16000));
+    processor.onaudioprocess = (e) => {
+      if (relayPeers.size === 0) return;
+      if (!micTrack.enabled) return; // mic mutado = nao envia
+      const input = e.inputBuffer.getChannelData(0);
+      const outLen = Math.floor(input.length / ratio);
+      if (outLen < 1) return;
+      const int16 = new Int16Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const s = Math.max(-1, Math.min(1, input[i * ratio]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      socket.emit('relay-media', { type: 'mic', data: int16.buffer });
+    };
+    micRelayNodes = { source, processor, silentGain };
+  }
+
+  function stopMicRelay() {
+    if (!micRelayNodes) return;
+    try { micRelayNodes.processor.disconnect(); } catch (_) {}
+    try { micRelayNodes.source.disconnect(); } catch (_) {}
+    try { micRelayNodes.silentGain.disconnect(); } catch (_) {}
+    micRelayNodes = null;
   }
 
   // ---------- RELAY: enviar midia via Socket.io ----------
@@ -400,32 +482,36 @@
     }, 100); // ~10fps
 
     // Audio: PCM 16kHz mono, sem eco (silent gain) e sem throttle
-    const audioCtx = getRemoteAudioCtx();
-    const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-    const silentGain = audioCtx.createGain();
-    silentGain.gain.value = 0; // FIX: sem isso, quem compartilha ouve o proprio audio (echo)
-    source.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(audioCtx.destination);
+    if (stream.getAudioTracks().length) {
+      const audioCtx = getRemoteAudioCtx();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0; // FIX: sem isso, quem compartilha ouve o proprio audio (echo)
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
-    // Ratio real de downsample baseado no sampleRate do contexto (48k->3, 44.1k->3)
-    const ratio = Math.max(1, Math.round(audioCtx.sampleRate / 16000));
+      // Ratio real de downsample baseado no sampleRate do contexto (48k->3, 44.1k->3)
+      const ratio = Math.max(1, Math.round(audioCtx.sampleRate / 16000));
 
-    processor.onaudioprocess = (e) => {
-      if (!isSharingScreen) return;
-      const input = e.inputBuffer.getChannelData(0);
-      const outLen = Math.floor(input.length / ratio);
-      if (outLen < 1) return;
-      const int16 = new Int16Array(outLen);
-      for (let i = 0; i < outLen; i++) {
-        const s = Math.max(-1, Math.min(1, input[i * ratio]));
-        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-      socket.emit('relay-media', { type: 'audio', data: int16.buffer });
-    };
+      processor.onaudioprocess = (e) => {
+        if (!isSharingScreen) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const outLen = Math.floor(input.length / ratio);
+        if (outLen < 1) return;
+        const int16 = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const s = Math.max(-1, Math.min(1, input[i * ratio]));
+          int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        socket.emit('relay-media', { type: 'audio', data: int16.buffer });
+      };
 
-    relaySenderNodes = { videoEl, processor, source, silentGain };
+      relaySenderNodes = { videoEl, processor, source, silentGain };
+    } else {
+      relaySenderNodes = { videoEl };
+    }
   }
 
   function stopRelaySender() {
@@ -451,7 +537,8 @@
     const peer = peers.get(id);
     if (peer) teardownPeer(id);
     createRelayPeer(id, name);
-    socket.emit('relay-subscribe'); // avisa o server que quero receber relay
+    socket.emit('relay-subscribe');      // quero receber relay
+    socket.emit('relay-mode', { to: id }); // avisa o outro lado pra fazer o mesmo
     updateParticipantsList();
   }
 
@@ -597,9 +684,21 @@
   }
 
   function refreshStageLayout() {
-    const sharingEntry = [...peers.entries()].find(([, p]) => p.tileEl.classList.contains('screen-tile'));
-    const relaySharing = [...relayPeers.entries()].find(([, p]) => p.sharingScreen);
-    const sharerId = sharingEntry ? sharingEntry[0] : (relaySharing ? relaySharing[0] : null);
+    // Prioridade: MEU share ocupa o palco (senao eu nao vejo a minha propria live);
+    // senao, o primeiro outro sharer (WebRTC ou relay)
+    let sharerId = null;
+    const selfPeer = peers.get('self');
+    if (selfPeer && selfPeer.tileEl.classList.contains('screen-tile')) {
+      sharerId = 'self';
+    } else {
+      const sharingEntry = [...peers.entries()].find(([id, p]) => id !== 'self' && p.tileEl.classList.contains('screen-tile'));
+      if (sharingEntry) {
+        sharerId = sharingEntry[0];
+      } else {
+        const relaySharing = [...relayPeers.entries()].find(([, p]) => p.sharingScreen);
+        if (relaySharing) sharerId = relaySharing[0];
+      }
+    }
     const anySharing = !!sharerId;
     stage.classList.toggle('has-screen', anySharing);
     thumbStrip.hidden = !anySharing;
@@ -730,6 +829,10 @@
       stopScreenShare();
       return;
     }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      showToast('Seu navegador não suporta compartilhamento de tela. Use Chrome ou Edge no computador.');
+      return;
+    }
     qualityPopover.hidden = !qualityPopover.hidden;
   });
 
@@ -752,7 +855,11 @@
         surfaceSwitching: 'include',    // trocar de janela sem parar a live
         systemAudio: 'include',         // permite capturar audio do sistema
       });
-    } catch (_) { return; }
+    } catch (err) {
+      if (err?.name === 'NotAllowedError') showToast('Compartilhamento cancelado ou permissão negada.');
+      else showToast('Não foi possível compartilhar a tela (' + (err?.name || 'erro desconhecido') + ').');
+      return;
+    }
 
     const screenTrack = screenStream.getVideoTracks()[0];
     screenTrack.contentHint = 'motion';
@@ -952,6 +1059,7 @@
   // ---------- saida ----------
   function teardownAllAndReturnToLobby(errorMsg) {
     stopRelaySender(); // ANTES de limpar os mapas (usa relaySenderNodes)
+    stopMicRelay();
     isSharingScreen = false;
     peers.forEach((peer, id) => {
       if (peer.raf) cancelAnimationFrame(peer.raf);
@@ -983,6 +1091,7 @@
 
   window.addEventListener('beforeunload', () => {
     stopRelaySender();
+    stopMicRelay();
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
   });
