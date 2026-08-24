@@ -748,6 +748,9 @@
           height: { ideal: selectedHeight, max: selectedHeight },
         },
         audio: true,
+        selfBrowserSurface: 'exclude',  // nao deixa compartilhar a propria aba (evita efeito espelho)
+        surfaceSwitching: 'include',    // trocar de janela sem parar a live
+        systemAudio: 'include',         // permite capturar audio do sistema
       });
     } catch (_) { return; }
 
