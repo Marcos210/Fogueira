@@ -94,6 +94,7 @@ app.post('/api/rooms', createRoomLimiter, async (req, res) => {
     createdAt: Date.now(),
     lastActive: Date.now(),
     members: new Map(),
+    relaySubs: new Set(),
   });
 
   res.json({ code });
@@ -183,16 +184,31 @@ io.on('connection', (socket) => {
     socket.to(joinedRoom).emit('screen-share-state', { id: socket.id, sharing: !!sharing });
   });
 
-  // Relay de midia: recebe binario e repassa pra sala (fallback quando WebRTC falha)
+  // Cliente avisa que nao consegue WebRTC e vai receber midia via relay
+  socket.on('relay-subscribe', () => {
+    if (!joinedRoom) return;
+    const room = rooms.get(joinedRoom);
+    if (!room) return;
+    room.relaySubs.add(socket.id);
+  });
+
+  // Relay de midia: recebe e repassa SÓ pra quem pediu relay (fallback do WebRTC)
   socket.on('relay-media', ({ type, data } = {}) => {
     if (!joinedRoom || !type || !data) return;
-    socket.to(joinedRoom).emit('relay-media', { from: socket.id, type, data });
+    const room = rooms.get(joinedRoom);
+    if (!room) return;
+    const size = typeof data === 'string' ? data.length : (data.byteLength || data.size || 0);
+    if (size > 400_000) return; // protecao contra flood
+    for (const peerId of room.relaySubs) {
+      if (peerId !== socket.id) io.to(peerId).emit('relay-media', { from: socket.id, type, data });
+    }
   });
 
   socket.on('disconnect', () => {
     if (!joinedRoom) return;
     const room = rooms.get(joinedRoom);
     if (!room) return;
+    room.relaySubs.delete(socket.id);
     room.members.delete(socket.id);
     room.lastActive = Date.now();
     socket.to(joinedRoom).emit('peer-left', { id: socket.id });

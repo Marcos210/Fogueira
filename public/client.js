@@ -40,13 +40,13 @@
   let isSharingScreen = false;
   let remoteAudioMuted = false;
   let liveVolume = 1.0;
-  const peers = new Map();
+  const peers = new Map();       // id -> conexao WebRTC
+  const relayPeers = new Map();  // id -> tile recebido via relay
+  const peerNames = new Map();   // id -> nome real do peer
 
-  // ---------- relay state ----------
-  const relayPeers = new Map(); // id -> { canvas, ctx, audioCtx, gainNode, videoInterval, name }
+  // ---------- relay sender state ----------
   let relayVideoInterval = null;
-  let relayCanvas = null;
-  let relayCtx = null;
+  let relaySenderNodes = null; // { videoEl, processor, source, silentGain }
 
   // ---------- audio context global ----------
   let remoteAudioCtx = null;
@@ -71,25 +71,21 @@
   const volumeOverlay = document.getElementById('volume-overlay');
   const volumeSlider = document.getElementById('volume-slider');
   const volumeValue = document.getElementById('volume-value');
-  let volumeTargetPeer = null;
 
   function showVolumeOverlay(e, peerId) {
-    volumeTargetPeer = peerId;
     volumeSlider.value = liveVolume;
     updateVolumeLabel();
     volumeOverlay.hidden = false;
-    const rect = stage.getBoundingClientRect();
-    let x = e.clientX - rect.left;
-    let y = e.clientY - rect.top;
-    x = Math.max(80, Math.min(x, rect.width - 80));
-    y = Math.max(40, Math.min(y, rect.height - 40));
+    // position:fixed -> coordenadas de viewport direto
+    const pad = 60;
+    const x = Math.max(pad, Math.min(e.clientX, window.innerWidth - pad));
+    const y = Math.max(pad, Math.min(e.clientY - 20, window.innerHeight - pad));
     volumeOverlay.style.left = x + 'px';
     volumeOverlay.style.top = y + 'px';
   }
 
   function hideVolumeOverlay() {
     volumeOverlay.hidden = true;
-    volumeTargetPeer = null;
   }
 
   function updateVolumeLabel() {
@@ -106,16 +102,13 @@
   volumeOverlay.addEventListener('mouseup', (e) => e.stopPropagation());
 
   function applyVolumeToAll() {
+    const v = remoteAudioMuted ? 0 : liveVolume;
     peers.forEach((peer, id) => {
       if (id === 'self') return;
-      if (peer.gainNode) {
-        peer.gainNode.gain.value = remoteAudioMuted ? 0 : liveVolume;
-      }
+      if (peer.gainNode) peer.gainNode.gain.value = v;
     });
-    relayPeers.forEach((rp, id) => {
-      if (rp.gainNode) {
-        rp.gainNode.gain.value = remoteAudioMuted ? 0 : liveVolume;
-      }
+    relayPeers.forEach((rp) => {
+      if (rp.gainNode) rp.gainNode.gain.value = v;
     });
   }
 
@@ -213,11 +206,15 @@
     selfId = id;
     document.getElementById('room-name').textContent = roomName || 'PulseCord';
     addLocalTile();
-    existingPeers.forEach((p) => createPeerConnection(p.id, p.name, true));
+    existingPeers.forEach((p) => {
+      peerNames.set(p.id, p.name);
+      createPeerConnection(p.id, p.name, true);
+    });
     updateParticipantsList();
   });
 
   socket.on('peer-joined', ({ id, name }) => {
+    peerNames.set(id, name);
     createPeerConnection(id, name, false);
     updateParticipantsList();
     logSystem(`${name} entrou na sala.`);
@@ -225,16 +222,11 @@
   });
 
   socket.on('peer-left', ({ id }) => {
-    const peer = peers.get(id);
-    if (peer) {
-      logSystem(`${peer.name} saiu.`);
-      teardownPeer(id);
-    }
-    const rp = relayPeers.get(id);
-    if (rp) {
-      logSystem(`${rp.name} saiu.`);
-      teardownRelayPeer(id);
-    }
+    const name = peerNames.get(id) || peers.get(id)?.name || relayPeers.get(id)?.name || 'Alguem';
+    logSystem(`${name} saiu.`);
+    peerNames.delete(id);
+    if (peers.has(id)) teardownPeer(id);
+    if (relayPeers.has(id)) teardownRelayPeer(id);
     updateParticipantsList();
     playNotificationSound('leave');
   });
@@ -242,8 +234,10 @@
   socket.on('signal', async ({ from, data }) => {
     let peer = peers.get(from);
     if (data.type === 'offer') {
+      // Offer nova: derruba conexao antiga E tile relay desse peer pra nao duplicar
       if (peer) teardownPeer(from);
-      peer = createPeerConnection(from, 'Amigo', false);
+      if (relayPeers.has(from)) teardownRelayPeer(from);
+      peer = createPeerConnection(from, peerNames.get(from) || 'Amigo', false);
     } else if (!peer) {
       return;
     }
@@ -258,7 +252,9 @@
           await peer.pc.setRemoteDescription(data);
         }
       } else if (data.candidate) {
-        await peer.pc.addIceCandidate(data);
+        if (peer.pc.remoteDescription) {
+          await peer.pc.addIceCandidate(data);
+        }
       }
     } catch (err) {
       console.warn('[PulseCord] Erro ao processar signal:', err.message);
@@ -285,38 +281,53 @@
 
   // ---------- RELAY: receber midia via Socket.io ----------
   socket.on('relay-media', ({ from, type, data }) => {
-    let rp = relayPeers.get(from);
+    // Se ja tenho WebRTC conectado com essa pessoa, ignoro o relay (evita tile duplicado)
+    const wp = peers.get(from);
+    if (wp && wp.pc.connectionState === 'connected' && type !== 'state') return;
 
-    // Cria tile de relay se nao existe
-    if (!rp) {
-      rp = createRelayPeer(from, 'Amigo');
-    }
+    let rp = relayPeers.get(from);
+    if (!rp) rp = createRelayPeer(from, peerNames.get(from) || 'Amigo');
 
     if (type === 'video' && data) {
       const img = new Image();
       img.onload = () => {
-        rp.ctx.drawImage(img, 0, 0, rp.canvas.width, rp.canvas.height);
+        // Letterbox: mantem aspect ratio sem distorcer
+        const cw = rp.canvas.width, ch = rp.canvas.height;
+        rp.ctx.fillStyle = '#000';
+        rp.ctx.fillRect(0, 0, cw, ch);
+        const scale = Math.min(cw / img.width, ch / img.height);
+        const w = img.width * scale, h = img.height * scale;
+        rp.ctx.drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h);
         rp.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       };
       img.src = 'data:image/jpeg;base64,' + data;
     } else if (type === 'audio' && data) {
       try {
-        const raw = atob(data);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        const float32 = new Float32Array(bytes.buffer);
+        const buf = data instanceof ArrayBuffer ? data : Uint8Array.from(atob(data), (c) => c.charCodeAt(0)).buffer;
+        const int16 = new Int16Array(buf);
+        const float32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
         const audioCtx = rp.audioCtx;
         const buffer = audioCtx.createBuffer(1, float32.length, 16000);
         buffer.getChannelData(0).set(float32);
+
+        // Jitter buffer: agenda chunks em sequencia suave
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;
         source.connect(rp.gainNode);
-        source.start();
+        const now = audioCtx.currentTime;
+        if (rp.nextTime === undefined || rp.nextTime < now) rp.nextTime = now + 0.05;
+        source.start(rp.nextTime);
+        rp.nextTime += buffer.duration;
       } catch (_) {}
     } else if (type === 'state') {
       rp.sharingScreen = !!data;
       rp.tileEl.classList.toggle('screen-tile', rp.sharingScreen);
       rp.tileEl.querySelector('.screen-badge').hidden = !rp.sharingScreen;
+      if (!rp.sharingScreen) {
+        rp.ctx.fillStyle = '#000';
+        rp.ctx.fillRect(0, 0, rp.canvas.width, rp.canvas.height);
+      }
       refreshStageLayout();
     }
   });
@@ -325,7 +336,6 @@
     const tileEl = createTile(name);
     stage.appendChild(tileEl);
 
-    // Troca o <video> por um <canvas> pro relay
     const videoEl = tileEl.querySelector('video');
     const canvas = document.createElement('canvas');
     canvas.width = 640;
@@ -347,6 +357,7 @@
       ctx: canvas.getContext('2d'),
       audioCtx,
       gainNode,
+      nextTime: undefined,
       sharingScreen: false,
     };
     relayPeers.set(id, rp);
@@ -357,6 +368,7 @@
   function teardownRelayPeer(id) {
     const rp = relayPeers.get(id);
     if (!rp) return;
+    if (rp.gainNode) { try { rp.gainNode.disconnect(); } catch (_) {} }
     rp.tileEl.remove();
     relayPeers.delete(id);
     refreshStageLayout();
@@ -364,66 +376,68 @@
 
   // ---------- RELAY: enviar midia via Socket.io ----------
   function startRelaySender(stream) {
-    // Video: captura canvas em JPEG e envia
-    relayCanvas = document.createElement('canvas');
-    relayCanvas.width = 640;
-    relayCanvas.height = 360;
-    relayCtx = relayCanvas.getContext('2d');
+    stopRelaySender(); // garante que nao duplica
 
     const videoEl = document.createElement('video');
     videoEl.srcObject = stream;
     videoEl.muted = true;
     videoEl.play().catch(() => {});
 
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
     relayVideoInterval = setInterval(() => {
       if (!isSharingScreen) return;
-      relayCtx.drawImage(videoEl, 0, 0, relayCanvas.width, relayCanvas.height);
-      const b64 = relayCanvas.toDataURL('image/jpeg', 0.5).split(',')[1];
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      if (!vw || !vh) return;
+      // Mantem aspect ratio real do video (max 640 de largura)
+      const scale = Math.min(1, 640 / vw);
+      canvas.width = Math.round(vw * scale);
+      canvas.height = Math.round(vh * scale);
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      const b64 = canvas.toDataURL('image/jpeg', 0.55).split(',')[1];
       socket.emit('relay-media', { type: 'video', data: b64 });
-    }, 100); // 10fps
+    }, 100); // ~10fps
 
-    // Audio: captura PCM e envia
+    // Audio: PCM 16kHz mono, sem eco (silent gain) e sem throttle
     const audioCtx = getRemoteAudioCtx();
     const source = audioCtx.createMediaStreamSource(stream);
     const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0; // FIX: sem isso, quem compartilha ouve o proprio audio (echo)
     source.connect(processor);
-    processor.connect(audioCtx.destination);
+    processor.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
 
-    let audioThrottle = 0;
+    // Ratio real de downsample baseado no sampleRate do contexto (48k->3, 44.1k->3)
+    const ratio = Math.max(1, Math.round(audioCtx.sampleRate / 16000));
+
     processor.onaudioprocess = (e) => {
       if (!isSharingScreen) return;
-      const now = Date.now();
-      if (now - audioThrottle < 100) return; // throttle: 10x/s
-      audioThrottle = now;
       const input = e.inputBuffer.getChannelData(0);
-      // Downsample 48k->16k
-      const downsampled = new Float32Array(input.length / 3);
-      for (let i = 0; i < downsampled.length; i++) {
-        downsampled[i] = input[i * 3];
-      }
-      const int16 = new Int16Array(downsampled.length);
-      for (let i = 0; i < downsampled.length; i++) {
-        const s = Math.max(-1, Math.min(1, downsampled[i]));
+      const outLen = Math.floor(input.length / ratio);
+      if (outLen < 1) return;
+      const int16 = new Int16Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const s = Math.max(-1, Math.min(1, input[i * ratio]));
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      // Convert to base64
-      let b64 = '';
-      const bytes = new Uint8Array(int16.buffer);
-      for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
-      socket.emit('relay-media', { type: 'audio', data: btoa(b64) });
+      socket.emit('relay-media', { type: 'audio', data: int16.buffer });
     };
 
-    // Salva referencia pra limpar
-    relayPeers.set('__self_sender', { videoEl, processor, source });
+    relaySenderNodes = { videoEl, processor, source, silentGain };
   }
 
   function stopRelaySender() {
-    const sender = relayPeers.get('__self_sender');
-    if (sender) {
-      if (sender.videoEl.srcObject) sender.videoEl.srcObject.getTracks().forEach((t) => t.stop());
-      try { sender.processor.disconnect(); } catch (_) {}
-      try { sender.source.disconnect(); } catch (_) {}
-      relayPeers.delete('__self_sender');
+    if (relaySenderNodes) {
+      try { relaySenderNodes.processor.disconnect(); } catch (_) {}
+      try { relaySenderNodes.source.disconnect(); } catch (_) {}
+      try { relaySenderNodes.silentGain.disconnect(); } catch (_) {}
+      if (relaySenderNodes.videoEl.srcObject) {
+        // Nao paramos os tracks daqui (o screenStream dono cuida disso)
+        relaySenderNodes.videoEl.srcObject = null;
+      }
+      relaySenderNodes = null;
     }
     if (relayVideoInterval) {
       clearInterval(relayVideoInterval);
@@ -432,10 +446,12 @@
   }
 
   function enterRelayMode(id, name) {
+    if (relayPeers.has(id)) return; // ja esta em relay
     console.log('[PulseCord] Entrando em modo RELAY com', name);
     const peer = peers.get(id);
     if (peer) teardownPeer(id);
     createRelayPeer(id, name);
+    socket.emit('relay-subscribe'); // avisa o server que quero receber relay
     updateParticipantsList();
   }
 
@@ -471,12 +487,11 @@
     };
 
     pc.ontrack = (e) => {
-      console.log('[PulseCord] ontrack de', name, '— kind:', e.track.kind);
       const stream = e.streams[0];
       if (!stream) return;
       peer.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       if (e.track.kind === 'video') peer.videoEl.srcObject = stream;
-      peer.videoEl.muted = true;
+      peer.videoEl.muted = true; // audio sempre via GainNode
       if (e.track.kind === 'audio') {
         if (peer.sourceNode) { try { peer.sourceNode.disconnect(); } catch (_) {} }
         const source = audioCtx.createMediaStreamSource(stream);
@@ -488,48 +503,53 @@
 
     let iceRestartCount = 0;
     let disconnectTimer = null;
-    let relayAttempted = forceRelay || false;
+    const relayAttempted = forceRelay || false;
+
+    // Timeout: se nao conectar em 12s, vai pro relay (em vez de esperar ICE eternamente)
+    const connectTimeout = setTimeout(() => {
+      if (pc.connectionState !== 'connected' && pc.iceConnectionState !== 'connected' && !relayAttempted) {
+        console.log('[PulseCord] Timeout de conexao com', name, '— fallback para RELAY');
+        enterRelayMode(id, name);
+      }
+    }, 12000);
 
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
-      console.log('[PulseCord] ICE com', name, ':', state);
 
       if (state === 'disconnected') {
         disconnectTimer = setTimeout(async () => {
           if (pc.iceConnectionState === 'disconnected' && iceRestartCount < 3) {
             iceRestartCount++;
-            console.log('[PulseCord] ICE restart #' + iceRestartCount, 'com', name);
             try {
               const offer = await pc.createOffer({ iceRestart: true });
               await pc.setLocalDescription(offer);
               socket.emit('signal', { to: id, data: pc.localDescription });
-            } catch (err) {
-              console.warn('[PulseCord] Falha no ICE restart:', err);
-            }
+            } catch (_) {}
           }
         }, 3000);
       } else if (state === 'failed') {
+        clearTimeout(connectTimeout);
         if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
-        if (!relayAttempted) {
-          console.log('[PulseCord] WebRTC falhou — fallback para RELAY');
+        if (!relayAttempted && !relayPeers.has(id)) {
+          console.log('[PulseCord] WebRTC falhou com', name, '— fallback para RELAY');
           enterRelayMode(id, name);
         }
-        return;
-      } else {
+      } else if (state === 'connected' || state === 'completed') {
+        clearTimeout(connectTimeout);
         if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
-        if (state === 'connected' || state === 'completed') iceRestartCount = 0;
+        iceRestartCount = 0;
       }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log('[PulseCord] Conexao com', name, ':', pc.connectionState);
     };
 
     if (isInitiator) {
       pc.onnegotiationneeded = async () => {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('signal', { to: id, data: pc.localDescription });
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit('signal', { to: id, data: pc.localDescription });
+        } catch (err) {
+          console.warn('[PulseCord] Erro na negociacao:', err.message);
+        }
       };
     }
 
@@ -541,7 +561,8 @@
     if (!peer) return;
     if (peer.raf) cancelAnimationFrame(peer.raf);
     if (peer.sourceNode) { try { peer.sourceNode.disconnect(); } catch (_) {} }
-    peer.pc.close();
+    if (peer.gainNode) { try { peer.gainNode.disconnect(); } catch (_) {} }
+    try { peer.pc.close(); } catch (_) {}
     peer.tileEl.remove();
     peers.delete(id);
     refreshStageLayout();
@@ -577,21 +598,18 @@
 
   function refreshStageLayout() {
     const sharingEntry = [...peers.entries()].find(([, p]) => p.tileEl.classList.contains('screen-tile'));
-    const relaySharing = [...relayPeers.entries()].find(([id, p]) => id !== '__self_sender' && p.sharingScreen);
-    const anySharing = !!(sharingEntry || relaySharing);
+    const relaySharing = [...relayPeers.entries()].find(([, p]) => p.sharingScreen);
+    const sharerId = sharingEntry ? sharingEntry[0] : (relaySharing ? relaySharing[0] : null);
+    const anySharing = !!sharerId;
     stage.classList.toggle('has-screen', anySharing);
     thumbStrip.hidden = !anySharing;
 
     peers.forEach((peer, id) => {
-      const isSharer = anySharing && sharingEntry && sharingEntry[0] === id;
-      const target = anySharing && !isSharer ? thumbStrip : stage;
+      const target = anySharing && id !== sharerId ? thumbStrip : stage;
       if (peer.tileEl.parentElement !== target) target.appendChild(peer.tileEl);
     });
-
     relayPeers.forEach((rp, id) => {
-      if (id === '__self_sender') return;
-      const isSharer = anySharing && relaySharing && relaySharing[0] === id;
-      const target = anySharing && !isSharer ? thumbStrip : stage;
+      const target = anySharing && id !== sharerId ? thumbStrip : stage;
       if (rp.tileEl.parentElement !== target) target.appendChild(rp.tileEl);
     });
   }
@@ -599,23 +617,25 @@
   // ---------- audio meter ----------
   function startAudioMeter(peer, stream) {
     if (!stream.getAudioTracks().length) return;
-    const ctx = getRemoteAudioCtx();
-    const source = ctx.createMediaStreamSource(stream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.6;
-    source.connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    function tick() {
-      analyser.getByteFrequencyData(data);
-      const avg = data.reduce((a, b) => a + b, 0) / data.length;
-      const level = Math.min(1, avg / 90);
-      peer.ring.style.setProperty('--level', level.toFixed(3));
-      const row = participantsList.querySelector(`[data-peer-id="${peer.__id || ''}"]`);
-      if (row) row.classList.toggle('speaking', level > 0.15);
-      peer.raf = requestAnimationFrame(tick);
-    }
-    tick();
+    try {
+      const ctx = getRemoteAudioCtx();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.6;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      function tick() {
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((a, b) => a + b, 0) / data.length;
+        const level = Math.min(1, avg / 90);
+        peer.ring.style.setProperty('--level', level.toFixed(3));
+        const row = participantsList.querySelector(`[data-peer-id="${peer.__id || ''}"]`);
+        if (row) row.classList.toggle('speaking', level > 0.15);
+        peer.raf = requestAnimationFrame(tick);
+      }
+      tick();
+    } catch (_) {}
   }
 
   // ---------- sons de notificacao ----------
@@ -645,7 +665,9 @@
   // ---------- participantes ----------
   function updateParticipantsList() {
     participantsList.innerHTML = '';
-    const allIds = new Set([...peers.keys(), ...relayPeers.keys()].filter((id) => id !== 'self' && id !== '__self_sender'));
+    const allIds = new Set();
+    peers.forEach((_, id) => { if (id !== 'self') allIds.add(id); });
+    relayPeers.forEach((_, id) => allIds.add(id));
     const rows = [{ id: 'self', name: `${displayName} (voce)` }];
     allIds.forEach((id) => {
       const p = peers.get(id) || relayPeers.get(id);
@@ -658,9 +680,7 @@
       row.innerHTML = `<span class="dot"></span><span>${escapeHtml(name)}</span>`;
       participantsList.appendChild(row);
       const peer = peers.get(id);
-      const rp = relayPeers.get(id);
       if (peer) peer.__id = id;
-      if (rp) rp.__id = id;
     });
   }
 
@@ -686,7 +706,7 @@
     camBtn.setAttribute('aria-pressed', String(track.enabled));
   });
 
-  // ---------- compartilhamento de tela ----------
+  // ---------- compartilhamento de tela com seletor de qualidade ----------
   let selectedWidth = 1280;
   let selectedHeight = 720;
   let selectedFps = 30;
@@ -705,7 +725,7 @@
     });
   });
 
-  screenBtn.addEventListener('click', async () => {
+  screenBtn.addEventListener('click', () => {
     if (isSharingScreen) {
       stopScreenShare();
       return;
@@ -714,7 +734,7 @@
   });
 
   document.addEventListener('click', (e) => {
-    if (!qualityPopover.hidden && !qualityPopover.contains(e.target) && e.target !== screenBtn && !screenBtn.contains(e.target)) {
+    if (!qualityPopover.hidden && !qualityPopover.contains(e.target) && !screenBtn.contains(e.target)) {
       qualityPopover.hidden = true;
     }
   });
@@ -722,7 +742,11 @@
   async function startScreenShare() {
     try {
       screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: selectedFps, max: selectedFps }, width: { ideal: selectedWidth, max: selectedWidth }, height: { ideal: selectedHeight, max: selectedHeight } },
+        video: {
+          frameRate: { ideal: selectedFps, max: selectedFps },
+          width: { ideal: selectedWidth, max: selectedWidth },
+          height: { ideal: selectedHeight, max: selectedHeight },
+        },
         audio: true,
       });
     } catch (_) { return; }
@@ -730,8 +754,10 @@
     const screenTrack = screenStream.getVideoTracks()[0];
     screenTrack.contentHint = 'motion';
 
+    // WebRTC pra quem tem conexao
     await sendVideoTrackToPeers(screenTrack, screenStream);
 
+    // Relay pra quem nao tem (server filtra: so recebe quem pediu relay-subscribe)
     startRelaySender(screenStream);
     socket.emit('relay-media', { type: 'state', data: true });
 
@@ -815,7 +841,7 @@
       await pc.setLocalDescription(offer);
       socket.emit('signal', { to: id, data: pc.localDescription });
     } catch (err) {
-      console.error('[PulseCord] Falha ao renegociar com', id, ':', err);
+      console.warn('[PulseCord] Falha ao renegociar:', err.message);
     }
   }
 
@@ -823,8 +849,8 @@
     try {
       const params = sender.getParameters();
       if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-      params.encodings[0].maxBitrate = 2_500_000;
-      params.encodings[0].maxFramerate = 30;
+      params.encodings[0].maxBitrate = selectedHeight >= 1080 ? 6_000_000 : 2_500_000;
+      params.encodings[0].maxFramerate = selectedFps;
       sender.setParameters(params).catch(() => {});
     } catch (_) {}
   }
@@ -844,7 +870,7 @@
     if (!tile) return;
     let peerId = null;
     peers.forEach((peer, id) => { if (peer.tileEl === tile) peerId = id; });
-    relayPeers.forEach((rp, id) => { if (id !== '__self_sender' && rp.tileEl === tile) peerId = id; });
+    relayPeers.forEach((rp, id) => { if (rp.tileEl === tile) peerId = id; });
     if (!peerId || peerId === 'self') return;
     showVolumeOverlay(e, peerId);
   });
@@ -922,23 +948,29 @@
 
   // ---------- saida ----------
   function teardownAllAndReturnToLobby(errorMsg) {
+    stopRelaySender(); // ANTES de limpar os mapas (usa relaySenderNodes)
+    isSharingScreen = false;
     peers.forEach((peer, id) => {
       if (peer.raf) cancelAnimationFrame(peer.raf);
       if (peer.sourceNode) { try { peer.sourceNode.disconnect(); } catch (_) {} }
-      if (peer.pc) peer.pc.close();
+      if (peer.gainNode) { try { peer.gainNode.disconnect(); } catch (_) {} }
+      if (peer.pc) { try { peer.pc.close(); } catch (_) {} }
     });
-    relayPeers.forEach((rp, id) => {
-      if (id !== '__self_sender') rp.tileEl.remove();
+    relayPeers.forEach((rp) => {
+      if (rp.gainNode) { try { rp.gainNode.disconnect(); } catch (_) {} }
+      rp.tileEl.remove();
     });
-    relayPeers.clear();
     peers.clear();
+    relayPeers.clear();
+    peerNames.clear();
     stage.innerHTML = '';
     thumbStrip.innerHTML = '';
     thumbStrip.hidden = true;
     chatLog.innerHTML = '';
-    stopRelaySender();
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
+    localStream = null;
+    screenStream = null;
     socket.disconnect();
     callScreen.hidden = true;
     lobby.hidden = false;
@@ -947,6 +979,7 @@
   }
 
   window.addEventListener('beforeunload', () => {
+    stopRelaySender();
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
   });
