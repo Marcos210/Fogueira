@@ -377,8 +377,8 @@
 
     const videoEl = tileEl.querySelector('video');
     const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 360;
+    canvas.width = 1280;
+    canvas.height = 720;
     canvas.style.cssText = 'width:100%;height:100%;display:block;background:#000;border-radius:inherit;';
     const ring = tileEl.querySelector('.ember-ring');
     videoEl.style.display = 'none';
@@ -468,18 +468,26 @@
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
+    let relayQuality = 0.7;
     relayVideoInterval = setInterval(() => {
       if (!isSharingScreen) return;
       const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
       if (!vw || !vh) return;
-      // Mantem aspect ratio real do video (max 640 de largura)
-      const scale = Math.min(1, 640 / vw);
+      // Max 1280 de largura, mantem aspect ratio real
+      const scale = Math.min(1, 1280 / vw);
       canvas.width = Math.round(vw * scale);
       canvas.height = Math.round(vh * scale);
       ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-      const b64 = canvas.toDataURL('image/jpeg', 0.55).split(',')[1];
+      let b64 = canvas.toDataURL('image/jpeg', relayQuality).split(',')[1];
+      // Se frame > 200KB, reduz qualidade automaticamente
+      if (b64.length > 200_000 && relayQuality > 0.4) {
+        relayQuality = Math.max(0.4, relayQuality - 0.1);
+        b64 = canvas.toDataURL('image/jpeg', relayQuality).split(',')[1];
+      } else if (b64.length < 80_000 && relayQuality < 0.8) {
+        relayQuality = Math.min(0.8, relayQuality + 0.05);
+      }
       socket.emit('relay-media', { type: 'video', data: b64 });
-    }, 100); // ~10fps
+    }, 50); // ~20fps
 
     // Audio: PCM 16kHz mono, sem eco (silent gain) e sem throttle
     if (stream.getAudioTracks().length) {

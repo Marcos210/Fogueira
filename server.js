@@ -219,7 +219,7 @@ io.on('connection', (socket) => {
       else room.screenSharers.delete(socket.id);
     }
     const size = typeof data === 'string' ? data.length : (data.byteLength || data.size || 0);
-    if (size > 400_000) return; // protecao contra flood
+    if (size > 500_000) return; // protecao contra flood
     for (const peerId of room.relaySubs) {
       if (peerId !== socket.id) io.to(peerId).emit('relay-media', { from: socket.id, type, data });
     }
