@@ -330,13 +330,12 @@
     if (type === 'video' && data) {
       const img = new Image();
       img.onload = () => {
-        // Letterbox: mantem aspect ratio sem distorcer
-        const cw = rp.canvas.width, ch = rp.canvas.height;
-        rp.ctx.fillStyle = '#000';
-        rp.ctx.fillRect(0, 0, cw, ch);
-        const scale = Math.min(cw / img.width, ch / img.height);
-        const w = img.width * scale, h = img.height * scale;
-        rp.ctx.drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h);
+        // Canvas se adapta a resolucao real do remetente
+        if (rp.canvas.width !== img.width || rp.canvas.height !== img.height) {
+          rp.canvas.width = img.width;
+          rp.canvas.height = img.height;
+        }
+        rp.ctx.drawImage(img, 0, 0);
         rp.tileEl.querySelector('.avatar-fallback').style.display = 'none';
       };
       img.src = 'data:image/jpeg;base64,' + data;
@@ -379,7 +378,7 @@
     const canvas = document.createElement('canvas');
     canvas.width = 1280;
     canvas.height = 720;
-    canvas.style.cssText = 'width:100%;height:100%;display:block;background:#000;border-radius:inherit;';
+    canvas.style.cssText = 'width:100%;height:100%;display:block;background:#000;border-radius:inherit;object-fit:contain;';
     const ring = tileEl.querySelector('.ember-ring');
     videoEl.style.display = 'none';
     ring.insertBefore(canvas, ring.querySelector('.avatar-fallback'));
@@ -857,6 +856,7 @@
           frameRate: { ideal: selectedFps, max: selectedFps },
           width: { ideal: selectedWidth, max: selectedWidth },
           height: { ideal: selectedHeight, max: selectedHeight },
+          displaySurface: 'monitor',    // prioriza tela inteira (evita barra cinza do Chrome)
         },
         audio: true,
         selfBrowserSurface: 'exclude',  // nao deixa compartilhar a propria aba (evita efeito espelho)
